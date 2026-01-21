@@ -8,9 +8,9 @@ st.set_page_config(page_title="Analizador de Compras - Grupo Andrade", layout="w
 st.title("🔧 Herramienta de Análisis de Inventarios y Compras")
 st.markdown("### Fase 1: Carga, Relación y Estructura Completa")
 
-# --- LISTAS DE COLUMNAS DESEADAS (EXACTAS) ---
-# Nota: Pandas maneja duplicados (como HITS) agregando un sufijo .1, .2, etc.
-# Por ahora definimos la estructura ideal.
+# --- LISTAS DE COLUMNAS (USAMOS NOMBRES UNICOS INTERNAMENTE) ---
+# Nota: Usamos HITS_FORANEO temporalmente para evitar errores visuales en la app.
+# Al descargar el Excel, se cambiará automáticamente a HITS.
 
 COLS_CUAUTITLAN_ORDEN = [
     "N° PARTE", "SUGERIDO DIA", "POR FINCAR", "(Consumo Mensual / 2) - Inv Tran",
@@ -38,6 +38,7 @@ COLS_TULTITLAN_ORDEN = [
 
 def limpiar_inventario(archivo, nombre_sucursal):
     try:
+        # Detectamos extensión para usar el motor correcto
         if archivo.name.endswith('.xls'):
             df = pd.read_excel(archivo, header=None, engine='xlrd')
         else:
@@ -66,7 +67,6 @@ def cargar_base_sugerido(archivo):
         
         if "N° PARTE" not in df.columns:
             st.error(f"❌ Error en archivo {archivo.name}: No se encuentra la columna 'N° PARTE'.")
-            st.write("Columnas detectadas:", list(df.columns))
             return None
             
         df["N° PARTE"] = df["N° PARTE"].astype(str).str.strip()
@@ -76,16 +76,9 @@ def cargar_base_sugerido(archivo):
         return None
 
 def completar_y_ordenar(df, lista_columnas_deseadas):
-    """
-    Rellena las columnas faltantes con vacío y ordena el DF.
-    """
-    # 1. Crear columnas faltantes
     for col in lista_columnas_deseadas:
         if col not in df.columns:
-            df[col] = "" # Espacio vacío
-            
-    # 2. Reordenar y retornar solo las columnas deseadas
-    # Nota: Manejamos 'HITS' y 'HITS_FORANEO' para evitar duplicados en Pandas por ahora
+            df[col] = "" 
     return df[lista_columnas_deseadas]
 
 # --- INTERFAZ ---
@@ -139,11 +132,8 @@ if st.button("Generar Reporte Final"):
                     df_final_cuauti = pd.merge(df_final_cuauti, df_inv_tulti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
                     df_final_cuauti.rename(columns={'EXIST': 'INVENTARIO TULTITLAN', 'FEC ULT COMP': 'Fec ult Comp TULTI'}, inplace=True)
                     
-                    # Completar columnas
+                    # Completar y Ordenar (Mantiene HITS_FORANEO)
                     df_final_cuauti = completar_y_ordenar(df_final_cuauti, COLS_CUAUTITLAN_ORDEN)
-                    
-                    # Renombrar HITS_FORANEO a HITS para el Excel final (truco visual)
-                    df_final_cuauti.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True)
 
 
                     # --- PROCESO TULTITLAN ---
@@ -157,25 +147,33 @@ if st.button("Generar Reporte Final"):
                     df_final_tulti = pd.merge(df_final_tulti, df_inv_cuauti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
                     df_final_tulti.rename(columns={'EXIST': 'INVENTARIO CUAUTITLAN', 'FEC ULT COMP': 'Fec ult Comp CUAUTI'}, inplace=True)
                     
-                    # Ajuste especial: Renombrar N° PARTE a N° DE PARTE antes de ordenar
+                    # Ajuste nombre columna
                     df_final_tulti.rename(columns={'N° PARTE': 'N° DE PARTE'}, inplace=True)
                     
-                    # Completar columnas
+                    # Completar y Ordenar (Mantiene HITS_FORANEO)
                     df_final_tulti = completar_y_ordenar(df_final_tulti, COLS_TULTITLAN_ORDEN)
 
-                    # Renombrar HITS_FORANEO a HITS
-                    df_final_tulti.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True)
-
                     # --- EXPORTAR ---
+                    # Aquí hacemos el truco: Creamos copias para el Excel donde SÍ duplicamos el nombre HITS
+                    df_export_cuauti = df_final_cuauti.copy()
+                    df_export_cuauti.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True)
+                    
+                    df_export_tulti = df_final_tulti.copy()
+                    df_export_tulti.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True)
+
                     buffer = io.BytesIO()
                     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                        df_final_cuauti.to_excel(writer, sheet_name='DIA CUAUTITLAN', index=False)
-                        df_final_tulti.to_excel(writer, sheet_name='DIA TULTITLAN', index=False)
+                        df_export_cuauti.to_excel(writer, sheet_name='DIA CUAUTITLAN', index=False)
+                        df_export_tulti.to_excel(writer, sheet_name='DIA TULTITLAN', index=False)
                         
                     buffer.seek(0)
-                    st.success("✅ Reporte generado con todas las columnas.")
+                    st.success("✅ Reporte generado correctamente.")
                     st.download_button(label="📥 Descargar Excel Completo", data=buffer, file_name="Analisis_Compras_Fase1_Completo.xlsx", mime="application/vnd.ms-excel")
                     
+                    # --- VISTA PREVIA ---
+                    # Mostramos la versión CON nombres únicos para que Streamlit no falle
+                    st.markdown("#### Vista Previa (Cuautitlán)")
+                    st.write("Nota: En pantalla verás 'HITS_FORANEO', pero en tu Excel saldrá como 'HITS'.")
                     st.dataframe(df_final_cuauti.head())
 
     else:
