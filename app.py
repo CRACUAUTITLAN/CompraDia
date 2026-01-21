@@ -11,44 +11,55 @@ st.markdown("### Fase 1: Carga y Relación de Inventarios (Por Sucursal)")
 # --- FUNCIONES DE LIMPIEZA ---
 def limpiar_inventario(archivo, nombre_sucursal):
     """
-    Lee el archivo raw de inventario, selecciona columnas específicas por posición 
-    y limpia basándose en la columna J (Fecha de Ingreso).
+    Lee el archivo raw de inventario (.xls o .xlsx), selecciona columnas por posición 
+    y limpia basándose en la columna J.
     """
     try:
-        # Leemos sin encabezados porque el formato es crudo
-        df = pd.read_excel(archivo, header=None)
+        # Detectamos extensión para usar el motor correcto
+        if archivo.name.endswith('.xls'):
+            df = pd.read_excel(archivo, header=None, engine='xlrd')
+        else:
+            df = pd.read_excel(archivo, header=None, engine='openpyxl')
         
-        # Mapeo de columnas basado en índices (A=0, B=1, etc.)
-        # A: N° PARTE (0), B: DESCR (1), C: CLASIF (2), E: PRECIO UNIT(4)
-        # I: EXIST (8), J: FEC INGRESO (9), K: FEC ULT COMP (10), L: FEC ULT VTA (11)
+        # Mapeo de columnas basado en índices
         col_indices = [0, 1, 2, 4, 8, 9, 10, 11]
         col_names = [
             "N° PARTE", "DESCR", "CLASIF", "PRECIO UNITARIO", 
             "EXIST", "FEC INGRESO", "FEC ULT COMP", "FEC ULT VTA"
         ]
         
-        # Seleccionamos solo las columnas de interés
         df_clean = df.iloc[:, col_indices].copy()
         df_clean.columns = col_names
         
-        # --- LIMPIEZA CLAVE ---
-        # Eliminamos filas donde 'FEC INGRESO' sea nulo
+        # Limpieza clave
         df_clean = df_clean.dropna(subset=["FEC INGRESO"])
         
-        # Convertimos N° PARTE a string y quitamos espacios
+        # Convertimos N° PARTE a string
         df_clean["N° PARTE"] = df_clean["N° PARTE"].astype(str).str.strip()
         
         return df_clean
 
     except Exception as e:
-        st.error(f"Error al procesar el inventario de {nombre_sucursal}: {e}")
+        st.error(f"Error crítico al procesar inventario de {nombre_sucursal}: {e}")
         return None
 
 def cargar_base_sugerido(archivo):
-    """Carga la base simple de N° PARTE y SUGERIDO DIA"""
+    """Carga la base simple de N° PARTE y SUGERIDO DIA con limpieza de encabezados"""
     try:
         df = pd.read_excel(archivo)
-        # Aseguramos que N° PARTE sea texto para el cruce
+        
+        # --- LIMPIEZA DE ENCABEZADOS ---
+        # Quitamos espacios en blanco al principio y final de los nombres de columnas
+        df.columns = df.columns.str.strip()
+        
+        # Verificación de columna clave
+        if "N° PARTE" not in df.columns:
+            st.error(f"❌ Error en archivo {archivo.name}: No se encuentra la columna 'N° PARTE'.")
+            st.write("Las columnas encontradas son:", list(df.columns))
+            st.warning("Por favor revisa que esté escrita exactamente así: N° PARTE (cuidado con los espacios o el símbolo °)")
+            return None
+            
+        # Aseguramos formato texto
         df["N° PARTE"] = df["N° PARTE"].astype(str).str.strip()
         return df
     except Exception as e:
@@ -64,29 +75,28 @@ st.info("Sube aquí los archivos con las columnas 'N° PARTE' y 'SUGERIDO DIA'."
 col1, col2 = st.columns(2)
 with col1:
     st.subheader("Para Cuautitlán")
-    file_sugerido_cuauti = st.file_uploader("📂 Base Sugerido Cuautitlán", type=["xlsx"], key="sug_cuauti")
+    file_sugerido_cuauti = st.file_uploader("📂 Sugerido Cuautitlán (.xlsx)", type=["xlsx"], key="sug_cuauti")
 
 with col2:
     st.subheader("Para Tultitlán")
-    file_sugerido_tulti = st.file_uploader("📂 Base Sugerido Tultitlán", type=["xlsx"], key="sug_tulti")
+    file_sugerido_tulti = st.file_uploader("📂 Sugerido Tultitlán (.xlsx)", type=["xlsx"], key="sug_tulti")
 
 st.markdown("---")
 st.header("Paso 2: Subida de Inventarios (Almacén)")
-st.info("Sube aquí los reportes de inventario completos.")
+st.info("Sube aquí los reportes de inventario completos (.xls o .xlsx).")
 
 col3, col4 = st.columns(2)
 with col3:
     st.subheader("Inventario Cuautitlán")
-    file_inv_cuauti = st.file_uploader("📦 Inventario Cuautitlán (Raw)", type=["xlsx", "xls"], key="inv_cuauti")
+    file_inv_cuauti = st.file_uploader("📦 Inventario Cuautitlán", type=["xlsx", "xls"], key="inv_cuauti")
 
 with col4:
     st.subheader("Inventario Tultitlán")
-    file_inv_tulti = st.file_uploader("📦 Inventario Tultitlán (Raw)", type=["xlsx", "xls"], key="inv_tulti")
+    file_inv_tulti = st.file_uploader("📦 Inventario Tultitlán", type=["xlsx", "xls"], key="inv_tulti")
 
 # --- PROCESAMIENTO ---
 
 if st.button("Generar Reporte Fase 1"):
-    # Verificamos que los 4 archivos estén cargados
     if file_sugerido_cuauti and file_sugerido_tulti and file_inv_cuauti and file_inv_tulti:
         
         with st.spinner('Procesando bases de datos...'):
@@ -94,98 +104,49 @@ if st.button("Generar Reporte Fase 1"):
             df_base_cuauti = cargar_base_sugerido(file_sugerido_cuauti)
             df_base_tulti = cargar_base_sugerido(file_sugerido_tulti)
             
-            # 2. Limpiar Inventarios
-            df_inv_cuauti_clean = limpiar_inventario(file_inv_cuauti, "Cuautitlán")
-            df_inv_tulti_clean = limpiar_inventario(file_inv_tulti, "Tultitlán")
-            
-            if (df_base_cuauti is not None and df_base_tulti is not None and 
-                df_inv_cuauti_clean is not None and df_inv_tulti_clean is not None):
+            # Solo seguimos si las bases de sugerido se cargaron bien
+            if df_base_cuauti is not None and df_base_tulti is not None:
                 
-                # ---------------------------------------------------------
-                # LOGICA PARA HOJA: DIA CUAUTITLAN
-                # Usamos la base sugerido de Cuauti + Inv Cuauti (Local) + Inv Tulti (Foráneo)
-                # ---------------------------------------------------------
-                df_final_cuauti = df_base_cuauti.copy()
+                # 2. Limpiar Inventarios
+                df_inv_cuauti_clean = limpiar_inventario(file_inv_cuauti, "Cuautitlán")
+                df_inv_tulti_clean = limpiar_inventario(file_inv_tulti, "Tultitlán")
                 
-                # A. Datos Locales (Cuauti) -> EXISTENCIA, ULT COMPRA
-                df_final_cuauti = pd.merge(
-                    df_final_cuauti, 
-                    df_inv_cuauti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']], 
-                    on='N° PARTE', 
-                    how='left'
-                )
-                df_final_cuauti.rename(columns={
-                    'EXIST': 'EXISTENCIA',
-                    'FEC ULT COMP': 'FECHA DE ULTIMA COMPRA'
-                }, inplace=True)
-                
-                # B. Datos Foráneos (Tulti) -> INV TULTI, ULT COMP TULTI
-                df_final_cuauti = pd.merge(
-                    df_final_cuauti,
-                    df_inv_tulti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']],
-                    on='N° PARTE',
-                    how='left'
-                )
-                df_final_cuauti.rename(columns={
-                    'EXIST': 'INVENTARIO TULTITLAN',
-                    'FEC ULT COMP': 'Fec ult Comp TULTI'
-                }, inplace=True)
-
-                # ---------------------------------------------------------
-                # LOGICA PARA HOJA: DIA TULTITLAN
-                # Usamos la base sugerido de Tulti + Inv Tulti (Local) + Inv Cuauti (Foráneo)
-                # ---------------------------------------------------------
-                df_final_tulti = df_base_tulti.copy()
-                
-                # A. Datos Locales (Tulti) -> EXISTENCIA, ULT COMPRA
-                df_final_tulti = pd.merge(
-                    df_final_tulti,
-                    df_inv_tulti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']],
-                    on='N° PARTE',
-                    how='left'
-                )
-                df_final_tulti.rename(columns={
-                    'EXIST': 'EXISTENCIA',
-                    'FEC ULT COMP': 'FECHA DE ULTIMA COMPRA'
-                }, inplace=True)
-                
-                # B. Datos Foráneos (Cuauti) -> INV CUAUTI, ULT COMP CUAUTI
-                df_final_tulti = pd.merge(
-                    df_final_tulti,
-                    df_inv_cuauti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']],
-                    on='N° PARTE',
-                    how='left'
-                )
-                df_final_tulti.rename(columns={
-                    'EXIST': 'INVENTARIO CUAUTITLAN',
-                    'FEC ULT COMP': 'Fec ult Comp CUAUTI'
-                }, inplace=True)
-
-                # ---------------------------------------------------------
-                # EXPORTACIÓN
-                # ---------------------------------------------------------
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                    df_final_cuauti.to_excel(writer, sheet_name='DIA CUAUTITLAN', index=False)
-                    df_final_tulti.to_excel(writer, sheet_name='DIA TULTITLAN', index=False)
+                if df_inv_cuauti_clean is not None and df_inv_tulti_clean is not None:
                     
-                buffer.seek(0)
-                
-                st.success("✅ ¡Archivos procesados correctamente!")
-                
-                st.download_button(
-                    label="📥 Descargar Excel Final",
-                    data=buffer,
-                    file_name="Analisis_Compras_Fase1.xlsx",
-                    mime="application/vnd.ms-excel"
-                )
-                
-                # Vistas previas rápidas
-                st.markdown("#### Vista Previa: Resultado Cuautitlán")
-                st.dataframe(df_final_cuauti.head())
-                
-                st.markdown("#### Vista Previa: Resultado Tultitlán")
-                st.dataframe(df_final_tulti.head())
+                    # --- CRUCE CUAUTITLAN ---
+                    df_final_cuauti = df_base_cuauti.copy()
+                    
+                    # Local
+                    df_final_cuauti = pd.merge(df_final_cuauti, df_inv_cuauti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
+                    df_final_cuauti.rename(columns={'EXIST': 'EXISTENCIA', 'FEC ULT COMP': 'FECHA DE ULTIMA COMPRA'}, inplace=True)
+                    
+                    # Foráneo
+                    df_final_cuauti = pd.merge(df_final_cuauti, df_inv_tulti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
+                    df_final_cuauti.rename(columns={'EXIST': 'INVENTARIO TULTITLAN', 'FEC ULT COMP': 'Fec ult Comp TULTI'}, inplace=True)
+
+                    # --- CRUCE TULTITLAN ---
+                    df_final_tulti = df_base_tulti.copy()
+                    
+                    # Local
+                    df_final_tulti = pd.merge(df_final_tulti, df_inv_tulti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
+                    df_final_tulti.rename(columns={'EXIST': 'EXISTENCIA', 'FEC ULT COMP': 'FECHA DE ULTIMA COMPRA'}, inplace=True)
+                    
+                    # Foráneo
+                    df_final_tulti = pd.merge(df_final_tulti, df_inv_cuauti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
+                    df_final_tulti.rename(columns={'EXIST': 'INVENTARIO CUAUTITLAN', 'FEC ULT COMP': 'Fec ult Comp CUAUTI'}, inplace=True)
+
+                    # --- EXPORTAR ---
+                    buffer = io.BytesIO()
+                    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                        df_final_cuauti.to_excel(writer, sheet_name='DIA CUAUTITLAN', index=False)
+                        df_final_tulti.to_excel(writer, sheet_name='DIA TULTITLAN', index=False)
+                        
+                    buffer.seek(0)
+                    st.success("✅ ¡Todo listo! Descarga tu archivo.")
+                    st.download_button(label="📥 Descargar Excel Final", data=buffer, file_name="Analisis_Compras_Fase1.xlsx", mime="application/vnd.ms-excel")
+                    
+                    st.markdown("#### Vista Previa: DIA CUAUTITLAN")
+                    st.dataframe(df_final_cuauti.head())
 
     else:
-        st.warning("⚠️ Faltan archivos. Asegúrate de cargar los 2 sugeridos y los 2 inventarios.")
+        st.warning("⚠️ Por favor sube los 4 archivos.")
