@@ -28,13 +28,18 @@ except Exception as e:
     st.error(f"⚠️ Error de conexión con Google: {e}")
     st.stop()
 
-# --- FUNCIONES DRIVE ---
+# --- FUNCIONES DRIVE (SOPORTE UNIDADES COMPARTIDAS) ---
 
 def buscar_o_crear_carpeta(nombre_carpeta, parent_id):
     try:
-        # Buscamos si ya existe la carpeta
+        # Buscamos si ya existe la carpeta (supportsAllDrives=True es CLAVE aquí)
         query = f"mimeType='application/vnd.google-apps.folder' and name='{nombre_carpeta}' and '{parent_id}' in parents and trashed=false"
-        results = drive_service.files().list(q=query, fields="files(id, name)").execute()
+        results = drive_service.files().list(
+            q=query, 
+            fields="files(id, name)",
+            supportsAllDrives=True, 
+            includeItemsFromAllDrives=True
+        ).execute()
         files = results.get('files', [])
 
         if files:
@@ -46,11 +51,16 @@ def buscar_o_crear_carpeta(nombre_carpeta, parent_id):
                 'mimeType': 'application/vnd.google-apps.folder',
                 'parents': [parent_id]
             }
-            folder = drive_service.files().create(body=metadata, fields='id').execute()
+            folder = drive_service.files().create(
+                body=metadata, 
+                fields='id',
+                supportsAllDrives=True
+            ).execute()
             return folder.get('id')
     except Exception as e:
-        # Si falla aquí, es casi seguro que el ID de la carpeta en secrets está mal
-        st.error(f"❌ Error al acceder a la carpeta '{parent_id}'. Verifica que el ID en secrets sea correcto y coincida con el de la carpeta compartida.")
+        st.error(f"❌ Error al acceder a la carpeta '{parent_id}'.")
+        st.warning("Si estás usando una carpeta personal ('Mi Unidad'), el Robot no tiene espacio para subir archivos.")
+        st.warning("SOLUCIÓN: Usa una 'Unidad Compartida' (Shared Drive) de la empresa.")
         st.error(f"Detalle técnico: {e}")
         return None
 
@@ -81,7 +91,12 @@ def subir_excel_a_drive(buffer, nombre_archivo):
             'parents': [id_mes]
         }
         
-        archivo_nuevo = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
+        archivo_nuevo = drive_service.files().create(
+            body=file_metadata, 
+            media_body=media, 
+            fields='id, webViewLink',
+            supportsAllDrives=True
+        ).execute()
         return archivo_nuevo.get('webViewLink')
 
     except Exception as e:
@@ -90,7 +105,6 @@ def subir_excel_a_drive(buffer, nombre_archivo):
 
 # --- FUNCIONES PANDAS ---
 
-# LISTAS CON NOMBRES ÚNICOS PARA EVITAR ERROR DE PANTALLA
 COLS_CUAUTITLAN_ORDEN = [
     "N° PARTE", "SUGERIDO DIA", "POR FINCAR", "(Consumo Mensual / 2) - Inv Tran",
     "EXISTENCIA", "FECHA DE ULTIMA COMPRA", "PROMEDIO CUAUTITLAN", "HITS", 
@@ -115,7 +129,6 @@ COLS_TULTITLAN_ORDEN = [
 
 def limpiar_inventario(archivo, nombre_sucursal):
     try:
-        # Detectar extensión para usar xlrd si es necesario
         if archivo.name.endswith('.xls'):
             df = pd.read_excel(archivo, header=None, engine='xlrd')
         else:
@@ -154,7 +167,7 @@ def completar_y_ordenar(df, lista_columnas_deseadas):
 
 # --- INTERFAZ ---
 
-st.info("📂 Los archivos se subirán automáticamente a Google Drive.")
+st.info("📂 Los archivos se subirán a Google Drive (Requiere Unidad Compartida).")
 st.markdown("---")
 
 col1, col2 = st.columns(2)
@@ -196,7 +209,7 @@ if st.button("Procesar y Subir a Drive"):
                     df_final_cuauti.rename(columns={'EXIST': 'INVENTARIO TULTITLAN', 'FEC ULT COMP': 'Fec ult Comp TULTI'}, inplace=True)
                     df_final_cuauti = completar_y_ordenar(df_final_cuauti, COLS_CUAUTITLAN_ORDEN)
                     
-                    # PREPARAR EXPORTACION (Renombrando HITS)
+                    # PREPARAR EXPORTACION
                     df_export_cuauti = df_final_cuauti.copy()
                     df_export_cuauti.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True)
 
@@ -209,7 +222,7 @@ if st.button("Procesar y Subir a Drive"):
                     df_final_tulti.rename(columns={'N° PARTE': 'N° DE PARTE'}, inplace=True)
                     df_final_tulti = completar_y_ordenar(df_final_tulti, COLS_TULTITLAN_ORDEN)
                     
-                    # PREPARAR EXPORTACION (Renombrando HITS)
+                    # PREPARAR EXPORTACION
                     df_export_tulti = df_final_tulti.copy()
                     df_export_tulti.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True)
 
@@ -222,7 +235,6 @@ if st.button("Procesar y Subir a Drive"):
                     
                     # 5. SUBIR A DRIVE
                     fecha_hoy_str = datetime.datetime.now().strftime("%d_%m_%Y")
-                    # Agregamos hora para evitar nombres duplicados si pruebas mucho
                     hora_str = datetime.datetime.now().strftime("%H%M") 
                     nombre_archivo_final = f"Analisis_Compras_{fecha_hoy_str}_{hora_str}.xlsx"
                     
@@ -233,10 +245,9 @@ if st.button("Procesar y Subir a Drive"):
                         st.markdown(f"### [📂 Ver archivo en Google Drive]({link_drive})")
                         st.balloons()
                         
-                        # MOSTRAR VISTA PREVIA (Usamos la versión SIN duplicados para que no falle)
-                        st.markdown("#### Vista Previa (Cuautitlán)")
+                        st.markdown("#### Vista Previa")
                         st.dataframe(df_final_cuauti.head())
                     else:
-                        st.error("❌ Falló la subida a Drive. Revisa los permisos.")
+                        st.error("❌ Falló la subida. Asegúrate de usar una 'Unidad Compartida' (Shared Drive) y que el Robot sea editor.")
     else:
         st.warning("⚠️ Faltan archivos por cargar.")
