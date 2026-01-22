@@ -49,8 +49,8 @@ def buscar_o_crear_carpeta(nombre_carpeta, parent_id):
             folder = drive_service.files().create(body=metadata, fields='id').execute()
             return folder.get('id')
     except Exception as e:
-        # Si falla aquí, es 99% seguro que es por PERMISOS (Error 404)
-        st.error(f"❌ Error al acceder a la carpeta. ¿Compartiste la carpeta '{parent_id}' con el correo del robot?")
+        # Si falla aquí, es casi seguro que el ID de la carpeta en secrets está mal
+        st.error(f"❌ Error al acceder a la carpeta '{parent_id}'. Verifica que el ID en secrets sea correcto y coincida con el de la carpeta compartida.")
         st.error(f"Detalle técnico: {e}")
         return None
 
@@ -90,6 +90,7 @@ def subir_excel_a_drive(buffer, nombre_archivo):
 
 # --- FUNCIONES PANDAS ---
 
+# LISTAS CON NOMBRES ÚNICOS PARA EVITAR ERROR DE PANTALLA
 COLS_CUAUTITLAN_ORDEN = [
     "N° PARTE", "SUGERIDO DIA", "POR FINCAR", "(Consumo Mensual / 2) - Inv Tran",
     "EXISTENCIA", "FECHA DE ULTIMA COMPRA", "PROMEDIO CUAUTITLAN", "HITS", 
