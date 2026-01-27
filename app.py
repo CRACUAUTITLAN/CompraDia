@@ -8,7 +8,7 @@ from googleapiclient.http import MediaIoBaseUpload
 
 # Configuración de la página
 st.set_page_config(page_title="Analizador de Compras - Grupo Andrade", layout="wide")
-st.title("🔧 Herramienta de Análisis de Inventarios y Compras (Auto-Drive)")
+st.title("🔧 Herramienta de Análisis de Inventarios y Compras (Fase 2)")
 
 # --- CONFIGURACIÓN GOOGLE DRIVE ---
 try:
@@ -20,7 +20,7 @@ try:
             gcp_creds, scopes=['https://www.googleapis.com/auth/drive']
         )
         drive_service = build('drive', 'v3', credentials=creds)
-        st.success("✅ Robot de Google Drive conectado.")
+        st.success("✅ Robot de Google Drive conectado (Unidad Compartida).")
     else:
         st.error("❌ Faltan secretos. Revisa la configuración .streamlit/secrets.toml")
         st.stop()
@@ -28,83 +28,50 @@ except Exception as e:
     st.error(f"⚠️ Error de conexión con Google: {e}")
     st.stop()
 
-# --- FUNCIONES DRIVE (SOPORTE UNIDADES COMPARTIDAS) ---
+# --- FUNCIONES DRIVE ---
 
 def buscar_o_crear_carpeta(nombre_carpeta, parent_id):
     try:
-        # Buscamos si ya existe la carpeta (supportsAllDrives=True es CLAVE aquí)
         query = f"mimeType='application/vnd.google-apps.folder' and name='{nombre_carpeta}' and '{parent_id}' in parents and trashed=false"
         results = drive_service.files().list(
-            q=query, 
-            fields="files(id, name)",
-            supportsAllDrives=True, 
-            includeItemsFromAllDrives=True
+            q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True
         ).execute()
         files = results.get('files', [])
 
         if files:
             return files[0]['id']
         else:
-            # Si no existe, la creamos
-            metadata = {
-                'name': nombre_carpeta,
-                'mimeType': 'application/vnd.google-apps.folder',
-                'parents': [parent_id]
-            }
-            folder = drive_service.files().create(
-                body=metadata, 
-                fields='id',
-                supportsAllDrives=True
-            ).execute()
+            metadata = {'name': nombre_carpeta, 'mimeType': 'application/vnd.google-apps.folder', 'parents': [parent_id]}
+            folder = drive_service.files().create(body=metadata, fields='id', supportsAllDrives=True).execute()
             return folder.get('id')
     except Exception as e:
-        st.error(f"❌ Error al acceder a la carpeta '{parent_id}'.")
-        st.warning("Si estás usando una carpeta personal ('Mi Unidad'), el Robot no tiene espacio para subir archivos.")
-        st.warning("SOLUCIÓN: Usa una 'Unidad Compartida' (Shared Drive) de la empresa.")
-        st.error(f"Detalle técnico: {e}")
+        st.error(f"❌ Error carpetas Drive: {e}")
         return None
 
 def subir_excel_a_drive(buffer, nombre_archivo):
     try:
         fecha_hoy = datetime.datetime.now()
         anio = str(fecha_hoy.year)
-        
-        meses_es = {
-            1: "01_Enero", 2: "02_Febrero", 3: "03_Marzo", 4: "04_Abril",
-            5: "05_Mayo", 6: "06_Junio", 7: "07_Julio", 8: "08_Agosto",
-            9: "09_Septiembre", 10: "10_Octubre", 11: "11_Noviembre", 12: "12_Diciembre"
-        }
+        meses_es = {1:"01_Enero", 2:"02_Febrero", 3:"03_Marzo", 4:"04_Abril", 5:"05_Mayo", 6:"06_Junio", 7:"07_Julio", 8:"08_Agosto", 9:"09_Septiembre", 10:"10_Octubre", 11:"11_Noviembre", 12:"12_Diciembre"}
         mes_carpeta = meses_es[fecha_hoy.month]
 
-        # 1. Carpeta AÑO
         id_anio = buscar_o_crear_carpeta(anio, PARENT_FOLDER_ID)
         if not id_anio: return None 
-        
-        # 2. Carpeta MES
         id_mes = buscar_o_crear_carpeta(mes_carpeta, id_anio)
         if not id_mes: return None
 
-        # 3. Subir Archivo
         media = MediaIoBaseUpload(buffer, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', resumable=True)
-        file_metadata = {
-            'name': nombre_archivo,
-            'parents': [id_mes]
-        }
+        file_metadata = {'name': nombre_archivo, 'parents': [id_mes]}
         
-        archivo_nuevo = drive_service.files().create(
-            body=file_metadata, 
-            media_body=media, 
-            fields='id, webViewLink',
-            supportsAllDrives=True
-        ).execute()
+        archivo_nuevo = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink', supportsAllDrives=True).execute()
         return archivo_nuevo.get('webViewLink')
-
     except Exception as e:
         st.error(f"Error subiendo a Drive: {e}")
         return None
 
-# --- FUNCIONES PANDAS ---
+# --- FUNCIONES DE PROCESAMIENTO (PANDAS) ---
 
+# Listas de columnas actualizadas
 COLS_CUAUTITLAN_ORDEN = [
     "N° PARTE", "SUGERIDO DIA", "POR FINCAR", "(Consumo Mensual / 2) - Inv Tran",
     "EXISTENCIA", "FECHA DE ULTIMA COMPRA", "PROMEDIO CUAUTITLAN", "HITS", 
@@ -143,20 +110,76 @@ def limpiar_inventario(archivo, nombre_sucursal):
         df_clean["N° PARTE"] = df_clean["N° PARTE"].astype(str).str.strip()
         return df_clean
     except Exception as e:
-        st.error(f"Error procesando inventario de {nombre_sucursal}. ¿Está instalado xlrd? Error: {e}")
+        st.error(f"Error inventario {nombre_sucursal}: {e}")
         return None
 
 def cargar_base_sugerido(archivo):
+    """
+    Carga la base sugerida y calcula el CONSUMO MENSUAL.
+    """
     try:
         df = pd.read_excel(archivo)
         df.columns = df.columns.str.strip()
+        
         if "N° PARTE" not in df.columns:
             st.error(f"❌ Error en {archivo.name}: No se encuentra la columna 'N° PARTE'.")
             return None
+        
+        # Limpieza clave
         df["N° PARTE"] = df["N° PARTE"].astype(str).str.strip()
+        
+        # --- CALCULO AUTOMATICO: CONSUMO MENSUAL ---
+        # Formula: Last 12 Month Demand / 12
+        if "Last 12 Month Demand" in df.columns:
+            # Aseguramos que sea numérico, convirtiendo errores a 0
+            df["Last 12 Month Demand"] = pd.to_numeric(df["Last 12 Month Demand"], errors='coerce').fillna(0)
+            df["CONSUMO MENSUAL"] = df["Last 12 Month Demand"] / 12
+        else:
+            st.warning(f"⚠️ No se encontró 'Last 12 Month Demand' en {archivo.name}. Se llenará con 0.")
+            df["CONSUMO MENSUAL"] = 0
+            
         return df
     except Exception as e:
         st.error(f"Error al leer sugerido: {e}")
+        return None
+
+def procesar_traspasos(archivo, filtro_nomenclatura, nombre_proceso):
+    """
+    Procesa el archivo de Situación para extraer traspasos.
+    Col A (0): Filtro (TRASUCTU / TRASUCCU)
+    Col C (2): N° Parte
+    Col E (4): Cantidad (Negativos)
+    """
+    try:
+        if archivo.name.endswith('.xls'):
+            df = pd.read_excel(archivo, header=None, engine='xlrd')
+        else:
+            df = pd.read_excel(archivo, header=None, engine='openpyxl')
+            
+        # 1. Filtramos por la nomenclatura en la Columna A (Indice 0)
+        # Convertimos a string y buscamos coincidencia exacta
+        df_filtrado = df[df[0].astype(str).str.strip() == filtro_nomenclatura].copy()
+        
+        if df_filtrado.empty:
+            st.info(f"ℹ️ No se encontraron traspasos con código '{filtro_nomenclatura}' en {nombre_proceso}.")
+            return pd.DataFrame(columns=["N° PARTE", "CANTIDAD_TRASPASO"])
+            
+        # 2. Seleccionamos columnas C (Parte) y E (Cantidad)
+        df_resumen = df_filtrado[[2, 4]].copy()
+        df_resumen.columns = ["N° PARTE", "CANTIDAD_TRASPASO"]
+        
+        # 3. Limpieza de datos
+        df_resumen["N° PARTE"] = df_resumen["N° PARTE"].astype(str).str.strip()
+        # Convertimos cantidad a numero y tomamos valor absoluto (positivo)
+        df_resumen["CANTIDAD_TRASPASO"] = pd.to_numeric(df_resumen["CANTIDAD_TRASPASO"], errors='coerce').fillna(0).abs()
+        
+        # 4. Agrupamos por Numero de Parte (Sumar duplicados)
+        df_agrupado = df_resumen.groupby("N° PARTE", as_index=False)["CANTIDAD_TRASPASO"].sum()
+        
+        return df_agrupado
+        
+    except Exception as e:
+        st.error(f"Error procesando traspasos {nombre_proceso}: {e}")
         return None
 
 def completar_y_ordenar(df, lista_columnas_deseadas):
@@ -165,89 +188,125 @@ def completar_y_ordenar(df, lista_columnas_deseadas):
             df[col] = "" 
     return df[lista_columnas_deseadas]
 
-# --- INTERFAZ ---
+# --- INTERFAZ GRAFICA ---
 
-st.info("📂 Los archivos se subirán a Google Drive (Requiere Unidad Compartida).")
-st.markdown("---")
+st.info("📂 Los archivos se subirán a Google Drive (Unidad Compartida).")
 
-col1, col2 = st.columns(2)
-with col1:
-    st.subheader("Para Cuautitlán")
-    file_sugerido_cuauti = st.file_uploader("📂 Sugerido Cuautitlán", type=["xlsx"], key="sug_cuauti")
-with col2:
-    st.subheader("Para Tultitlán")
-    file_sugerido_tulti = st.file_uploader("📂 Sugerido Tultitlán", type=["xlsx"], key="sug_tulti")
+# PASO 1: SUGERIDOS
+st.header("Paso 1: Bases Iniciales (Sugeridos)")
+st.markdown("Ahora con cálculo automático de *Consumo Mensual*.")
+c1, c2 = st.columns(2)
+file_sugerido_cuauti = c1.file_uploader("📂 Sugerido Cuautitlán", type=["xlsx"], key="sug_cuauti")
+file_sugerido_tulti = c2.file_uploader("📂 Sugerido Tultitlán", type=["xlsx"], key="sug_tulti")
 
 st.markdown("---")
-col3, col4 = st.columns(2)
-with col3:
-    st.subheader("Inventario Cuautitlán")
-    file_inv_cuauti = st.file_uploader("📦 Inventario Cuautitlán", type=["xlsx", "xls"], key="inv_cuauti")
-with col4:
-    st.subheader("Inventario Tultitlán")
-    file_inv_tulti = st.file_uploader("📦 Inventario Tultitlán", type=["xlsx", "xls"], key="inv_tulti")
 
-if st.button("Procesar y Subir a Drive"):
+# PASO 2: TRASPASOS (NUEVO)
+st.header("Paso 2: Reportes de Situación (Traspasos)")
+st.markdown("Carga los reportes de 'Situación' para detectar traspasos en tránsito.")
+c3, c4 = st.columns(2)
+# Ojo con la logica: Queremos saber qué llega A Cuautitlan (viene de Tulti)
+file_situacion_para_cuauti = c3.file_uploader("🚛 Situación Cuautitlán (Busca TRASUCTU)", type=["xlsx", "xls"], help="Este archivo llenará la columna 'TRASPASO TULTI A CUAUTI'", key="sit_cuauti")
+# Queremos saber qué llega A Tultitlan (viene de Cuauti)
+file_situacion_para_tulti = c4.file_uploader("🚛 Situación Tultitlán (Busca TRASUCCU)", type=["xlsx", "xls"], help="Este archivo llenará la columna 'TRASPASO CUAUT A TULTI'", key="sit_tulti")
+
+st.markdown("---")
+
+# PASO 3: INVENTARIOS
+st.header("Paso 3: Inventarios (Almacén)")
+c5, c6 = st.columns(2)
+file_inv_cuauti = c5.file_uploader("📦 Inventario Cuautitlán", type=["xlsx", "xls"], key="inv_cuauti")
+file_inv_tulti = c6.file_uploader("📦 Inventario Tultitlán", type=["xlsx", "xls"], key="inv_tulti")
+
+if st.button("🚀 Procesar Todo y Subir a Drive"):
+    # Verificamos archivos minimos (Sugeridos e Inventarios son obligatorios, Traspasos opcionales pero recomendados)
     if file_sugerido_cuauti and file_sugerido_tulti and file_inv_cuauti and file_inv_tulti:
-        with st.spinner('Procesando datos y conectando con Google Drive...'):
+        with st.spinner('Procesando bases, calculando consumos y cruzando traspasos...'):
             
-            # 1. CARGA
+            # A. CARGAR SUGERIDOS Y CALCULAR CONSUMO
             df_base_cuauti = cargar_base_sugerido(file_sugerido_cuauti)
             df_base_tulti = cargar_base_sugerido(file_sugerido_tulti)
             
-            if df_base_cuauti is not None and df_base_tulti is not None:
-                df_inv_cuauti_clean = limpiar_inventario(file_inv_cuauti, "Cuautitlán")
-                df_inv_tulti_clean = limpiar_inventario(file_inv_tulti, "Tultitlán")
+            # B. LIMPIAR INVENTARIOS
+            df_inv_cuauti_clean = limpiar_inventario(file_inv_cuauti, "Cuautitlán")
+            df_inv_tulti_clean = limpiar_inventario(file_inv_tulti, "Tultitlán")
+            
+            # C. PROCESAR TRASPASOS (Si se subieron)
+            # Para Cuauti (filtro TRASUCTU: De Tulti a Cuauti)
+            if file_situacion_para_cuauti:
+                df_traspasos_a_cuauti = procesar_traspasos(file_situacion_para_cuauti, "TRASUCTU", "Sit. Cuautitlán")
+            else:
+                df_traspasos_a_cuauti = pd.DataFrame(columns=["N° PARTE", "CANTIDAD_TRASPASO"])
+
+            # Para Tulti (filtro TRASUCCU: De Cuauti a Tulti)
+            if file_situacion_para_tulti:
+                df_traspasos_a_tulti = procesar_traspasos(file_situacion_para_tulti, "TRASUCCU", "Sit. Tultitlán")
+            else:
+                df_traspasos_a_tulti = pd.DataFrame(columns=["N° PARTE", "CANTIDAD_TRASPASO"])
+
+            # --- ARMADO FINAL ---
+            
+            if (df_base_cuauti is not None and df_base_tulti is not None and 
+                df_inv_cuauti_clean is not None and df_inv_tulti_clean is not None):
                 
-                if df_inv_cuauti_clean is not None and df_inv_tulti_clean is not None:
-                    
-                    # 2. LOGICA CUAUTITLAN
-                    df_final_cuauti = df_base_cuauti.copy()
-                    df_final_cuauti = pd.merge(df_final_cuauti, df_inv_cuauti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
-                    df_final_cuauti.rename(columns={'EXIST': 'EXISTENCIA', 'FEC ULT COMP': 'FECHA DE ULTIMA COMPRA'}, inplace=True)
-                    df_final_cuauti = pd.merge(df_final_cuauti, df_inv_tulti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
-                    df_final_cuauti.rename(columns={'EXIST': 'INVENTARIO TULTITLAN', 'FEC ULT COMP': 'Fec ult Comp TULTI'}, inplace=True)
-                    df_final_cuauti = completar_y_ordenar(df_final_cuauti, COLS_CUAUTITLAN_ORDEN)
-                    
-                    # PREPARAR EXPORTACION
-                    df_export_cuauti = df_final_cuauti.copy()
-                    df_export_cuauti.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True)
+                # === 1. HOJA DIA CUAUTITLAN ===
+                df_final_cuauti = df_base_cuauti.copy()
+                
+                # Merge Inventarios
+                df_final_cuauti = pd.merge(df_final_cuauti, df_inv_cuauti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
+                df_final_cuauti.rename(columns={'EXIST': 'EXISTENCIA', 'FEC ULT COMP': 'FECHA DE ULTIMA COMPRA'}, inplace=True)
+                df_final_cuauti = pd.merge(df_final_cuauti, df_inv_tulti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
+                df_final_cuauti.rename(columns={'EXIST': 'INVENTARIO TULTITLAN', 'FEC ULT COMP': 'Fec ult Comp TULTI'}, inplace=True)
+                
+                # Merge Traspasos (Tulti A Cuauti) -> Columna "TRASPASO TULTI A CUATI"
+                df_final_cuauti = pd.merge(df_final_cuauti, df_traspasos_a_cuauti, on='N° PARTE', how='left')
+                df_final_cuauti.rename(columns={'CANTIDAD_TRASPASO': 'TRASPASO TULTI A CUATI'}, inplace=True)
+                
+                # Completar
+                df_final_cuauti = completar_y_ordenar(df_final_cuauti, COLS_CUAUTITLAN_ORDEN)
+                df_export_cuauti = df_final_cuauti.copy()
+                df_export_cuauti.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True)
 
-                    # 3. LOGICA TULTITLAN
-                    df_final_tulti = df_base_tulti.copy()
-                    df_final_tulti = pd.merge(df_final_tulti, df_inv_tulti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
-                    df_final_tulti.rename(columns={'EXIST': 'EXISTENCIA', 'FEC ULT COMP': 'FECHA DE ULTIMA COMPRA'}, inplace=True)
-                    df_final_tulti = pd.merge(df_final_tulti, df_inv_cuauti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
-                    df_final_tulti.rename(columns={'EXIST': 'INVENTARIO CUAUTITLAN', 'FEC ULT COMP': 'Fec ult Comp CUAUTI'}, inplace=True)
-                    df_final_tulti.rename(columns={'N° PARTE': 'N° DE PARTE'}, inplace=True)
-                    df_final_tulti = completar_y_ordenar(df_final_tulti, COLS_TULTITLAN_ORDEN)
-                    
-                    # PREPARAR EXPORTACION
-                    df_export_tulti = df_final_tulti.copy()
-                    df_export_tulti.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True)
+                # === 2. HOJA DIA TULTITLAN ===
+                df_final_tulti = df_base_tulti.copy()
+                
+                # Merge Inventarios
+                df_final_tulti = pd.merge(df_final_tulti, df_inv_tulti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
+                df_final_tulti.rename(columns={'EXIST': 'EXISTENCIA', 'FEC ULT COMP': 'FECHA DE ULTIMA COMPRA'}, inplace=True)
+                df_final_tulti = pd.merge(df_final_tulti, df_inv_cuauti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
+                df_final_tulti.rename(columns={'EXIST': 'INVENTARIO CUAUTITLAN', 'FEC ULT COMP': 'Fec ult Comp CUAUTI'}, inplace=True)
+                
+                # Merge Traspasos (Cuauti A Tulti) -> Columna "TRASPASO CUAUT A TULTI"
+                df_final_tulti = pd.merge(df_final_tulti, df_traspasos_a_tulti, on='N° PARTE', how='left')
+                df_final_tulti.rename(columns={'CANTIDAD_TRASPASO': 'TRASPASO CUAUT A TULTI'}, inplace=True)
+                
+                # Ajustes finales
+                df_final_tulti.rename(columns={'N° PARTE': 'N° DE PARTE'}, inplace=True)
+                df_final_tulti = completar_y_ordenar(df_final_tulti, COLS_TULTITLAN_ORDEN)
+                df_export_tulti = df_final_tulti.copy()
+                df_export_tulti.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True)
 
-                    # 4. GENERAR EXCEL
-                    buffer = io.BytesIO()
-                    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                        df_export_cuauti.to_excel(writer, sheet_name='DIA CUAUTITLAN', index=False)
-                        df_export_tulti.to_excel(writer, sheet_name='DIA TULTITLAN', index=False)
-                    buffer.seek(0)
+                # === 3. SUBIDA A DRIVE ===
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                    df_export_cuauti.to_excel(writer, sheet_name='DIA CUAUTITLAN', index=False)
+                    df_export_tulti.to_excel(writer, sheet_name='DIA TULTITLAN', index=False)
+                buffer.seek(0)
+                
+                fecha_hoy_str = datetime.datetime.now().strftime("%d_%m_%Y")
+                hora_str = datetime.datetime.now().strftime("%H%M") 
+                nombre_archivo_final = f"Analisis_Compras_{fecha_hoy_str}_{hora_str}.xlsx"
+                
+                link_drive = subir_excel_a_drive(buffer, nombre_archivo_final)
+                
+                if link_drive:
+                    st.success(f"✅ ¡Proceso Completo! Archivo: {nombre_archivo_final}")
+                    st.markdown(f"### [📂 Ver archivo en Google Drive]({link_drive})")
+                    st.balloons()
                     
-                    # 5. SUBIR A DRIVE
-                    fecha_hoy_str = datetime.datetime.now().strftime("%d_%m_%Y")
-                    hora_str = datetime.datetime.now().strftime("%H%M") 
-                    nombre_archivo_final = f"Analisis_Compras_{fecha_hoy_str}_{hora_str}.xlsx"
-                    
-                    link_drive = subir_excel_a_drive(buffer, nombre_archivo_final)
-                    
-                    if link_drive:
-                        st.success(f"✅ ¡Éxito! Archivo guardado: {nombre_archivo_final}")
-                        st.markdown(f"### [📂 Ver archivo en Google Drive]({link_drive})")
-                        st.balloons()
-                        
-                        st.markdown("#### Vista Previa")
-                        st.dataframe(df_final_cuauti.head())
-                    else:
-                        st.error("❌ Falló la subida. Asegúrate de usar una 'Unidad Compartida' (Shared Drive) y que el Robot sea editor.")
+                    st.markdown("#### Vista Previa: DIA CUAUTITLAN (Con Traspasos y Consumo)")
+                    st.dataframe(df_final_cuauti.head())
+                else:
+                    st.error("❌ Falló la subida a Drive.")
     else:
-        st.warning("⚠️ Faltan archivos por cargar.")
+        st.warning("⚠️ Debes cargar al menos los Sugeridos y los Inventarios para procesar.")
