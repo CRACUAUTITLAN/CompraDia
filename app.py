@@ -8,7 +8,7 @@ from googleapiclient.http import MediaIoBaseUpload
 
 # Configuración de la página
 st.set_page_config(page_title="Analizador de Compras - Grupo Andrade", layout="wide")
-st.title("🔧 Herramienta de Análisis de Inventarios y Compras (Fase 2)")
+st.title("🔧 Herramienta de Análisis de Inventarios y Compras (Fase 3 - Ajuste Tránsito)")
 
 # --- CONFIGURACIÓN GOOGLE DRIVE ---
 try:
@@ -71,7 +71,6 @@ def subir_excel_a_drive(buffer, nombre_archivo):
 
 # --- FUNCIONES DE PROCESAMIENTO (PANDAS) ---
 
-# Listas de columnas actualizadas
 COLS_CUAUTITLAN_ORDEN = [
     "N° PARTE", "SUGERIDO DIA", "POR FINCAR", "(Consumo Mensual / 2) - Inv Tran",
     "EXISTENCIA", "FECHA DE ULTIMA COMPRA", "PROMEDIO CUAUTITLAN", "HITS", 
@@ -114,9 +113,6 @@ def limpiar_inventario(archivo, nombre_sucursal):
         return None
 
 def cargar_base_sugerido(archivo):
-    """
-    Carga la base sugerida y calcula el CONSUMO MENSUAL.
-    """
     try:
         df = pd.read_excel(archivo)
         df.columns = df.columns.str.strip()
@@ -125,59 +121,72 @@ def cargar_base_sugerido(archivo):
             st.error(f"❌ Error en {archivo.name}: No se encuentra la columna 'N° PARTE'.")
             return None
         
-        # Limpieza clave
         df["N° PARTE"] = df["N° PARTE"].astype(str).str.strip()
         
-        # --- CALCULO AUTOMATICO: CONSUMO MENSUAL ---
-        # Formula: Last 12 Month Demand / 12
         if "Last 12 Month Demand" in df.columns:
-            # Aseguramos que sea numérico, convirtiendo errores a 0
             df["Last 12 Month Demand"] = pd.to_numeric(df["Last 12 Month Demand"], errors='coerce').fillna(0)
             df["CONSUMO MENSUAL"] = df["Last 12 Month Demand"] / 12
         else:
-            st.warning(f"⚠️ No se encontró 'Last 12 Month Demand' en {archivo.name}. Se llenará con 0.")
             df["CONSUMO MENSUAL"] = 0
+            
+        df["2"] = df["CONSUMO MENSUAL"] / 2
             
         return df
     except Exception as e:
         st.error(f"Error al leer sugerido: {e}")
         return None
 
+def procesar_transito(archivo, nombre_sucursal):
+    """
+    Procesa archivos de Transito. 
+    Espera columnas: N° PARTE, TRANSITO
+    (Ignora INV. TOTAL por ahora)
+    """
+    try:
+        df = pd.read_excel(archivo)
+        df.columns = df.columns.str.strip() 
+        
+        # Ajuste: Solo buscamos N° PARTE y TRANSITO
+        cols_necesarias = ["N° PARTE", "TRANSITO"]
+        
+        for col in cols_necesarias:
+            if col not in df.columns:
+                st.warning(f"⚠️ Falta la columna '{col}' en Tránsito {nombre_sucursal}.")
+                df[col] = 0
+                
+        df_resumen = df[cols_necesarias].copy()
+        df_resumen["N° PARTE"] = df_resumen["N° PARTE"].astype(str).str.strip()
+        
+        # Agrupamos por si hay duplicados
+        df_agrupado = df_resumen.groupby("N° PARTE", as_index=False)["TRANSITO"].sum()
+        
+        return df_agrupado
+        
+    except Exception as e:
+        st.error(f"Error procesando tránsito {nombre_sucursal}: {e}")
+        return None
+
 def procesar_traspasos(archivo, filtro_nomenclatura, nombre_proceso):
-    """
-    Procesa el archivo de Situación para extraer traspasos.
-    Col A (0): Filtro (TRASUCTU / TRASUCCU)
-    Col C (2): N° Parte
-    Col E (4): Cantidad (Negativos)
-    """
     try:
         if archivo.name.endswith('.xls'):
             df = pd.read_excel(archivo, header=None, engine='xlrd')
         else:
             df = pd.read_excel(archivo, header=None, engine='openpyxl')
             
-        # 1. Filtramos por la nomenclatura en la Columna A (Indice 0)
-        # Convertimos a string y buscamos coincidencia exacta
         df_filtrado = df[df[0].astype(str).str.strip() == filtro_nomenclatura].copy()
         
         if df_filtrado.empty:
-            st.info(f"ℹ️ No se encontraron traspasos con código '{filtro_nomenclatura}' en {nombre_proceso}.")
             return pd.DataFrame(columns=["N° PARTE", "CANTIDAD_TRASPASO"])
             
-        # 2. Seleccionamos columnas C (Parte) y E (Cantidad)
         df_resumen = df_filtrado[[2, 4]].copy()
         df_resumen.columns = ["N° PARTE", "CANTIDAD_TRASPASO"]
         
-        # 3. Limpieza de datos
         df_resumen["N° PARTE"] = df_resumen["N° PARTE"].astype(str).str.strip()
-        # Convertimos cantidad a numero y tomamos valor absoluto (positivo)
         df_resumen["CANTIDAD_TRASPASO"] = pd.to_numeric(df_resumen["CANTIDAD_TRASPASO"], errors='coerce').fillna(0).abs()
         
-        # 4. Agrupamos por Numero de Parte (Sumar duplicados)
         df_agrupado = df_resumen.groupby("N° PARTE", as_index=False)["CANTIDAD_TRASPASO"].sum()
         
         return df_agrupado
-        
     except Exception as e:
         st.error(f"Error procesando traspasos {nombre_proceso}: {e}")
         return None
@@ -185,8 +194,16 @@ def procesar_traspasos(archivo, filtro_nomenclatura, nombre_proceso):
 def completar_y_ordenar(df, lista_columnas_deseadas):
     for col in lista_columnas_deseadas:
         if col not in df.columns:
-            df[col] = "" 
-    return df[lista_columnas_deseadas]
+            # Rellenamos con 0 las columnas faltantes (incluyendo INV. TOTAL)
+            df[col] = 0 
+    
+    # Reordenamos
+    df = df[lista_columnas_deseadas]
+    
+    # LIMPIEZA FINAL: Todo lo que sea NaN o vacío se vuelve 0
+    df = df.fillna(0)
+    
+    return df
 
 # --- INTERFAZ GRAFICA ---
 
@@ -194,51 +211,64 @@ st.info("📂 Los archivos se subirán a Google Drive (Unidad Compartida).")
 
 # PASO 1: SUGERIDOS
 st.header("Paso 1: Bases Iniciales (Sugeridos)")
-st.markdown("Ahora con cálculo automático de *Consumo Mensual*.")
 c1, c2 = st.columns(2)
 file_sugerido_cuauti = c1.file_uploader("📂 Sugerido Cuautitlán", type=["xlsx"], key="sug_cuauti")
 file_sugerido_tulti = c2.file_uploader("📂 Sugerido Tultitlán", type=["xlsx"], key="sug_tulti")
 
 st.markdown("---")
 
-# PASO 2: TRASPASOS (NUEVO)
-st.header("Paso 2: Reportes de Situación (Traspasos)")
-st.markdown("Carga los reportes de 'Situación' para detectar traspasos en tránsito.")
+# PASO 2: TRANSITO (Solo Columna TRANSITO)
+st.header("Paso 2: Reportes de Tránsito")
+st.markdown("Sube los archivos que contienen: N° PARTE y TRANSITO")
 c3, c4 = st.columns(2)
-# Ojo con la logica: Queremos saber qué llega A Cuautitlan (viene de Tulti)
-file_situacion_para_cuauti = c3.file_uploader("🚛 Situación Cuautitlán (Busca TRASUCTU)", type=["xlsx", "xls"], help="Este archivo llenará la columna 'TRASPASO TULTI A CUAUTI'", key="sit_cuauti")
-# Queremos saber qué llega A Tultitlan (viene de Cuauti)
-file_situacion_para_tulti = c4.file_uploader("🚛 Situación Tultitlán (Busca TRASUCCU)", type=["xlsx", "xls"], help="Este archivo llenará la columna 'TRASPASO CUAUT A TULTI'", key="sit_tulti")
+file_transito_cuauti = c3.file_uploader("🚢 Tránsito Cuautitlán", type=["xlsx"], key="trans_cuauti")
+file_transito_tulti = c4.file_uploader("🚢 Tránsito Tultitlán", type=["xlsx"], key="trans_tulti")
 
 st.markdown("---")
 
-# PASO 3: INVENTARIOS
-st.header("Paso 3: Inventarios (Almacén)")
+# PASO 3: TRASPASOS
+st.header("Paso 3: Reportes de Situación (Traspasos)")
 c5, c6 = st.columns(2)
-file_inv_cuauti = c5.file_uploader("📦 Inventario Cuautitlán", type=["xlsx", "xls"], key="inv_cuauti")
-file_inv_tulti = c6.file_uploader("📦 Inventario Tultitlán", type=["xlsx", "xls"], key="inv_tulti")
+file_situacion_para_cuauti = c5.file_uploader("🚛 Situación Cuautitlán (Busca TRASUCTU)", type=["xlsx", "xls"], key="sit_cuauti")
+file_situacion_para_tulti = c6.file_uploader("🚛 Situación Tultitlán (Busca TRASUCCU)", type=["xlsx", "xls"], key="sit_tulti")
+
+st.markdown("---")
+
+# PASO 4: INVENTARIOS
+st.header("Paso 4: Inventarios (Almacén)")
+c7, c8 = st.columns(2)
+file_inv_cuauti = c7.file_uploader("📦 Inventario Cuautitlán", type=["xlsx", "xls"], key="inv_cuauti")
+file_inv_tulti = c8.file_uploader("📦 Inventario Tultitlán", type=["xlsx", "xls"], key="inv_tulti")
 
 if st.button("🚀 Procesar Todo y Subir a Drive"):
-    # Verificamos archivos minimos (Sugeridos e Inventarios son obligatorios, Traspasos opcionales pero recomendados)
     if file_sugerido_cuauti and file_sugerido_tulti and file_inv_cuauti and file_inv_tulti:
-        with st.spinner('Procesando bases, calculando consumos y cruzando traspasos...'):
+        with st.spinner('Procesando bases...'):
             
-            # A. CARGAR SUGERIDOS Y CALCULAR CONSUMO
+            # A. CARGAR
             df_base_cuauti = cargar_base_sugerido(file_sugerido_cuauti)
             df_base_tulti = cargar_base_sugerido(file_sugerido_tulti)
             
-            # B. LIMPIAR INVENTARIOS
+            # B. INVENTARIOS
             df_inv_cuauti_clean = limpiar_inventario(file_inv_cuauti, "Cuautitlán")
             df_inv_tulti_clean = limpiar_inventario(file_inv_tulti, "Tultitlán")
             
-            # C. PROCESAR TRASPASOS (Si se subieron)
-            # Para Cuauti (filtro TRASUCTU: De Tulti a Cuauti)
+            # C. TRANSITOS (Paso 2 - Modificado para solo leer TRANSITO)
+            if file_transito_cuauti:
+                df_trans_cuauti = procesar_transito(file_transito_cuauti, "Cuautitlán")
+            else:
+                df_trans_cuauti = pd.DataFrame(columns=["N° PARTE", "TRANSITO"])
+
+            if file_transito_tulti:
+                df_trans_tulti = procesar_transito(file_transito_tulti, "Tultitlán")
+            else:
+                df_trans_tulti = pd.DataFrame(columns=["N° PARTE", "TRANSITO"])
+
+            # D. TRASPASOS (Paso 3)
             if file_situacion_para_cuauti:
                 df_traspasos_a_cuauti = procesar_traspasos(file_situacion_para_cuauti, "TRASUCTU", "Sit. Cuautitlán")
             else:
                 df_traspasos_a_cuauti = pd.DataFrame(columns=["N° PARTE", "CANTIDAD_TRASPASO"])
 
-            # Para Tulti (filtro TRASUCCU: De Cuauti a Tulti)
             if file_situacion_para_tulti:
                 df_traspasos_a_tulti = procesar_traspasos(file_situacion_para_tulti, "TRASUCCU", "Sit. Tultitlán")
             else:
@@ -258,11 +288,14 @@ if st.button("🚀 Procesar Todo y Subir a Drive"):
                 df_final_cuauti = pd.merge(df_final_cuauti, df_inv_tulti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
                 df_final_cuauti.rename(columns={'EXIST': 'INVENTARIO TULTITLAN', 'FEC ULT COMP': 'Fec ult Comp TULTI'}, inplace=True)
                 
-                # Merge Traspasos (Tulti A Cuauti) -> Columna "TRASPASO TULTI A CUATI"
+                # Merge Transito (Solo TRANSITO)
+                df_final_cuauti = pd.merge(df_final_cuauti, df_trans_cuauti, on='N° PARTE', how='left')
+                
+                # Merge Traspasos
                 df_final_cuauti = pd.merge(df_final_cuauti, df_traspasos_a_cuauti, on='N° PARTE', how='left')
                 df_final_cuauti.rename(columns={'CANTIDAD_TRASPASO': 'TRASPASO TULTI A CUATI'}, inplace=True)
                 
-                # Completar
+                # Completar y Llenar Ceros (Aqui INV. TOTAL se llena con 0)
                 df_final_cuauti = completar_y_ordenar(df_final_cuauti, COLS_CUAUTITLAN_ORDEN)
                 df_export_cuauti = df_final_cuauti.copy()
                 df_export_cuauti.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True)
@@ -276,7 +309,10 @@ if st.button("🚀 Procesar Todo y Subir a Drive"):
                 df_final_tulti = pd.merge(df_final_tulti, df_inv_cuauti_clean[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
                 df_final_tulti.rename(columns={'EXIST': 'INVENTARIO CUAUTITLAN', 'FEC ULT COMP': 'Fec ult Comp CUAUTI'}, inplace=True)
                 
-                # Merge Traspasos (Cuauti A Tulti) -> Columna "TRASPASO CUAUT A TULTI"
+                # Merge Transito
+                df_final_tulti = pd.merge(df_final_tulti, df_trans_tulti, on='N° PARTE', how='left')
+                
+                # Merge Traspasos
                 df_final_tulti = pd.merge(df_final_tulti, df_traspasos_a_tulti, on='N° PARTE', how='left')
                 df_final_tulti.rename(columns={'CANTIDAD_TRASPASO': 'TRASPASO CUAUT A TULTI'}, inplace=True)
                 
@@ -304,9 +340,9 @@ if st.button("🚀 Procesar Todo y Subir a Drive"):
                     st.markdown(f"### [📂 Ver archivo en Google Drive]({link_drive})")
                     st.balloons()
                     
-                    st.markdown("#### Vista Previa: DIA CUAUTITLAN (Con Traspasos y Consumo)")
+                    st.markdown("#### Vista Previa: DIA CUAUTITLAN")
                     st.dataframe(df_final_cuauti.head())
                 else:
                     st.error("❌ Falló la subida a Drive.")
     else:
-        st.warning("⚠️ Debes cargar al menos los Sugeridos y los Inventarios para procesar.")
+        st.warning("⚠️ Debes cargar al menos los Sugeridos y los Inventarios.")
