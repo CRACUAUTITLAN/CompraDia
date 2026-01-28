@@ -9,22 +9,21 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 # Configuración de la página
 st.set_page_config(page_title="Analizador BI - Grupo Andrade", layout="wide")
-st.title("🔧 Herramienta BI: Compras e Inventarios (Fase 4 - HITS Cruzados)")
+st.title("🔧 Herramienta BI: Compras e Inventarios (Fase 4 - Filtro AÑO/MES)")
 
 # --- CONFIGURACIÓN GOOGLE DRIVE ---
 try:
     if "gcp_service_account" in st.secrets and "general" in st.secrets:
         gcp_creds = dict(st.secrets["gcp_service_account"])
-        PARENT_FOLDER_ID = st.secrets["general"]["drive_folder_id"] # Salida (Shared Drive)
-        MASTER_SALES_ID = st.secrets["general"].get("master_sales_id") # Lectura (Tu Drive)
+        PARENT_FOLDER_ID = st.secrets["general"]["drive_folder_id"] # Salida
+        MASTER_SALES_ID = st.secrets["general"].get("master_sales_id") # Lectura
         
         creds = service_account.Credentials.from_service_account_info(
             gcp_creds, scopes=['https://www.googleapis.com/auth/drive']
         )
         drive_service = build('drive', 'v3', credentials=creds)
-        st.success("✅ Robot Conectado.")
     else:
-        st.error("❌ Faltan secretos.")
+        st.error("❌ Faltan secretos. Revisa la configuración.")
         st.stop()
 except Exception as e:
     st.error(f"⚠️ Error de conexión: {e}")
@@ -80,11 +79,9 @@ def descargar_archivo_drive(file_id):
 def buscar_archivos_ventas(agencia, anios):
     archivos_encontrados = []
     if not MASTER_SALES_ID:
-        st.warning("⚠️ No configuraste 'master_sales_id'.")
         return []
 
     for anio in anios:
-        # Busca por NOMBRE DEL ARCHIVO (Ej: CUAUTITLAN_Ventas_2025_MASTER)
         query = f"name contains '{agencia}' and name contains '{anio}' and name contains 'MASTER' and '{MASTER_SALES_ID}' in parents and trashed=false"
         results = drive_service.files().list(
             q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True
@@ -93,98 +90,148 @@ def buscar_archivos_ventas(agencia, anios):
         archivos_encontrados.extend(files)
     return archivos_encontrados
 
-# --- LOGICA BI (HITS HISTORICOS) ---
+# --- NUEVA LÓGICA BI HITS (AÑO/MES) ---
 
-def calcular_hits_historicos(agencia):
-    """
-    Calcula HITS con la fórmula: Total Eventos - (Negativos * 2).
-    """
-    st.info(f"🔄 Consultando Drive para ventas de: {agencia} ...")
+def mapear_mes_a_numero(mes_texto):
+    """Convierte 'ENERO', 'enero', 'ENE' a 1."""
+    if not isinstance(mes_texto, str): return 0
     
-    # 1. Fechas (12 meses cerrados anteriores)
+    mes = mes_texto.upper().strip()
+    diccionario = {
+        'ENERO': 1, 'FEBRERO': 2, 'MARZO': 3, 'ABRIL': 4,
+        'MAYO': 5, 'JUNIO': 6, 'JULIO': 7, 'AGOSTO': 8,
+        'SEPTIEMBRE': 9, 'OCTUBRE': 10, 'NOVIEMBRE': 11, 'DICIEMBRE': 12,
+        # Variaciones por si acaso
+        'ENE': 1, 'FEB': 2, 'MAR': 3, 'ABR': 4, 'MAY': 5, 'JUN': 6,
+        'JUL': 7, 'AGO': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DIC': 12
+    }
+    return diccionario.get(mes, 0)
+
+def obtener_dataframe_ventas(agencia):
+    """Descarga, une y calcula el 'PERIODO' numérico."""
     hoy = datetime.datetime.now()
-    fecha_fin = hoy.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    fecha_inicio = fecha_fin - relativedelta(years=1)
     
-    st.caption(f"📅 Rango Histórico: {fecha_inicio.strftime('%d-%b-%Y')} al {fecha_fin.strftime('%d-%b-%Y')}")
+    # Rango 12 meses exactos atrás (ignorando días)
+    # Si hoy es 28/01/2026 -> Limite Superior: 202601 (Exclusivo) -> Inicio: 202501 (Inclusivo)
+    # Si hoy es 15/02/2026 -> Limite Superior: 202602 -> Inicio: 202502
     
-    anios = list(set([fecha_inicio.year, fecha_fin.year]))
+    periodo_fin = hoy.year * 100 + hoy.month
     
-    # 2. Buscar Archivos por Nombre
-    files_metadata = buscar_archivos_ventas(agencia.upper(), anios)
+    fecha_inicio = hoy - relativedelta(years=1)
+    periodo_inicio = fecha_inicio.year * 100 + fecha_inicio.month
     
-    if not files_metadata:
-        st.warning(f"⚠️ No se encontraron archivos MASTER para {agencia} en {anios}.")
-        return None
+    # Años físicos a buscar en Drive
+    anios_drive = list(set([fecha_inicio.year, hoy.year]))
+    
+    files_metadata = buscar_archivos_ventas(agencia.upper(), anios_drive)
+    
+    if not files_metadata: return None, periodo_inicio, periodo_fin
 
     dfs = []
-    # 3. Descargar
-    bar = st.progress(0)
-    for i, file_meta in enumerate(files_metadata):
+    for file_meta in files_metadata:
         content = descargar_archivo_drive(file_meta['id'])
         if content:
             try:
                 engine = 'xlrd' if 'xls' in file_meta['name'] and 'xlsx' not in file_meta['name'] else 'openpyxl'
                 df_temp = pd.read_excel(content, engine=engine)
+                
+                # Estandarizar columnas a mayusculas (AÑO, MES, NP)
                 df_temp.columns = df_temp.columns.str.upper().str.strip()
-                dfs.append(df_temp)
+                
+                # Mapeo de nombre columna año/mes si varia ligeramente
+                # (A veces viene como 'AÑO', 'ANIO', 'MES', etc)
+                rename_map = {}
+                for col in df_temp.columns:
+                    if 'AÑO' in col or 'ANIO' in col: rename_map[col] = 'AÑO'
+                    if 'MES' in col and 'PROMEDIO' not in col: rename_map[col] = 'MES' # Evitar confundir con "MESES VENTA"
+                
+                df_temp.rename(columns=rename_map, inplace=True)
+                
+                if 'AÑO' in df_temp.columns and 'MES' in df_temp.columns:
+                    dfs.append(df_temp)
             except Exception: pass
-        bar.progress((i + 1) / len(files_metadata))
+            
+    if not dfs: return None, periodo_inicio, periodo_fin
     
-    if not dfs: return None
-    
-    # 4. Procesar
     df_total = pd.concat(dfs, ignore_index=True)
-    if 'FECHA' not in df_total.columns: return None
-        
-    df_total['FECHA'] = pd.to_datetime(df_total['FECHA'], errors='coerce')
-    mask = (df_total['FECHA'] >= fecha_inicio) & (df_total['FECHA'] < fecha_fin)
-    df_filtrado = df_total.loc[mask].copy()
+    return df_total, periodo_inicio, periodo_fin
+
+def calcular_hits_historicos(agencia, debug_np=None):
+    """
+    Calcula HITS usando filtro numérico de AÑO y MES.
+    """
+    df_total, p_inicio, p_fin = obtener_dataframe_ventas(agencia)
     
+    if df_total is None:
+        if debug_np: st.error(f"No se encontraron archivos para {agencia}.")
+        return None
+
+    # --- LÓGICA DE FILTRADO ROBUSTA ---
+    
+    # 1. Limpieza de AÑO
+    df_total['AÑO'] = pd.to_numeric(df_total['AÑO'], errors='coerce').fillna(0).astype(int)
+    
+    # 2. Limpieza de MES (Texto a Número)
+    # Asumimos que la columna 'MES' tiene texto (ENERO, FEBRERO...)
+    df_total['MES_NUM'] = df_total['MES'].astype(str).apply(mapear_mes_a_numero)
+    
+    # 3. Crear PERIODO (YYYYMM)
+    df_total['PERIODO'] = (df_total['AÑO'] * 100) + df_total['MES_NUM']
+    
+    # Debug
+    if debug_np:
+        st.markdown(f"### 🕵️ MODO DETECTIVE: {debug_np} en {agencia}")
+        st.write(f"**Rango Periodo:** {p_inicio} (Incluido) al {p_fin} (Excluido)")
+        
+        if 'NP' in df_total.columns:
+            df_total['NP_STR'] = df_total['NP'].astype(str).str.strip()
+            df_debug = df_total[df_total['NP_STR'] == str(debug_np).strip()].copy()
+            st.write(f"1. Filas totales en Excel (sin filtrar): **{len(df_debug)}**")
+            if not df_debug.empty:
+                st.write("Muestra de datos crudos (Mira las columnas AÑO y MES):")
+                st.dataframe(df_debug[['AÑO', 'MES', 'PERIODO', 'CANTIDAD']].head())
+    
+    # 4. FILTRO FINAL (El corazón del programa)
+    # Traeme todo lo que sea Mayor o Igual al Inicio Y Menor que el Fin
+    mask = (df_total['PERIODO'] >= p_inicio) & (df_total['PERIODO'] < p_fin)
+    df_filtrado = df_total.loc[mask].copy()
+
+    if debug_np and 'NP' in df_total.columns:
+        df_debug_filt = df_filtrado[df_filtrado['NP'].astype(str).str.strip() == str(debug_np).strip()]
+        st.write(f"2. Filas después del filtro de periodo: **{len(df_debug_filt)}**")
+        st.write(f"Estas son las filas que se usarán para el cálculo (Rango {p_inicio}-{p_fin}):")
+        st.dataframe(df_debug_filt[['AÑO', 'MES', 'CANTIDAD']].sort_values(['AÑO', 'MES']))
+
     if df_filtrado.empty: return None
 
-    # 5. Calculo Matemático Correcto
+    # 5. Cálculo Matemático
     if 'NP' not in df_filtrado.columns or 'CANTIDAD' not in df_filtrado.columns: return None
         
     df_filtrado['NP'] = df_filtrado['NP'].astype(str).str.strip()
     df_filtrado['CANTIDAD'] = pd.to_numeric(df_filtrado['CANTIDAD'], errors='coerce').fillna(0)
     
-    # Agrupar por NP
     resumen = df_filtrado.groupby('NP').agg(
-        total_eventos=('CANTIDAD', 'count'),  # Cuenta todas las filas (9)
-        eventos_negativos=('CANTIDAD', lambda x: (x < 0).sum()) # Cuenta las negativas (1)
+        total_eventos=('CANTIDAD', 'count'),
+        eventos_negativos=('CANTIDAD', lambda x: (x < 0).sum())
     ).reset_index()
     
-    # Formula: 9 - (1*2) = 7
     resumen['HITS_CALCULADO'] = resumen['total_eventos'] - (resumen['eventos_negativos'] * 2)
     resumen['HITS_CALCULADO'] = resumen['HITS_CALCULADO'].clip(lower=0) 
     
-    st.success(f"✅ HITS {agencia} calculados ({len(resumen)} productos).")
+    if debug_np:
+        row = resumen[resumen['NP'] == str(debug_np).strip()]
+        if not row.empty:
+            ev = row.iloc[0]['total_eventos']
+            neg = row.iloc[0]['eventos_negativos']
+            calc = row.iloc[0]['HITS_CALCULADO']
+            st.success(f"🧮 CÁLCULO: {ev} Total - ({neg} Negativos * 2) = **{calc} HITS**")
+
     return resumen[['NP', 'HITS_CALCULADO']]
 
-# --- PROCESAMIENTO PANDAS ---
-
-COLS_CUAUTITLAN_ORDEN = [
-    "N° PARTE", "SUGERIDO DIA", "POR FINCAR", "(Consumo Mensual / 2) - Inv Tran",
-    "EXISTENCIA", "FECHA DE ULTIMA COMPRA", "PROMEDIO CUAUTITLAN", "HITS", 
-    "CONSUMO MENSUAL", "2", "INVENTARIO TULTITLAN", "PROMEDIO TULTITLAN", 
-    "HITS_FORANEO", "TRASPASO TULTI A CUATI", "NUEVO TRASPASO", "CANTIDAD A TRASPASAR", 
-    "Fec ult Comp TULTI", "TRANSITO", "INV. TOTAL", "MESES VENTA ACTUAL", 
-    "MESES VENTA SUGERIDO", "Line Value", "Cycle Count", "Status", "Ship Multiple", 
-    "Last 12 Month Demand", "Current Month Demand", "Job Quantity", "Full Bin", 
-    "Bin Location", "Dealer On Hand", "Stock on Order", "Stock On Back Order", "Reason Code"
-]
-
-COLS_TULTITLAN_ORDEN = [
-    "N° DE PARTE", "SUGERIDO DIA", "POR FINCAR", "(Consumo Mensual / 2) - Inv Tran",
-    "EXISTENCIA", "FECHA DE ULTIMA COMPRA", "PROMEDIO TULTITLAN", "HITS", 
-    "CONSUMO MENSUAL", "2", "INVENTARIO CUAUTITLAN", "PROMEDIO CUAUTITLAN", 
-    "HITS_FORANEO", "TRASPASO CUAUT A TULTI", "NUEVO TRASPASO", "CANTIDAD A TRASPASAR", 
-    "Fec ult Comp CUAUTI", "TRANSITO", "INV. TOTAL", "MESES VENTA ACTUAL", 
-    "MESES VENTA SUGERIDO", "Line Value", "Cycle Count", "Status", "Ship Multiple", 
-    "Last 12 Month Demand", "Current Month Demand", "Job Quantity", "Full Bin", 
-    "Bin Location", "Dealer On Hand", "Stock on Order", "Stock On Back Order", "Reason Code"
-]
+# --- FUNCIONES PANDAS ---
+# (Funciones estándar mantenidas)
+COLS_CUAUTITLAN_ORDEN = ["N° PARTE", "SUGERIDO DIA", "POR FINCAR", "(Consumo Mensual / 2) - Inv Tran", "EXISTENCIA", "FECHA DE ULTIMA COMPRA", "PROMEDIO CUAUTITLAN", "HITS", "CONSUMO MENSUAL", "2", "INVENTARIO TULTITLAN", "PROMEDIO TULTITLAN", "HITS_FORANEO", "TRASPASO TULTI A CUATI", "NUEVO TRASPASO", "CANTIDAD A TRASPASAR", "Fec ult Comp TULTI", "TRANSITO", "INV. TOTAL", "MESES VENTA ACTUAL", "MESES VENTA SUGERIDO", "Line Value", "Cycle Count", "Status", "Ship Multiple", "Last 12 Month Demand", "Current Month Demand", "Job Quantity", "Full Bin", "Bin Location", "Dealer On Hand", "Stock on Order", "Stock On Back Order", "Reason Code"]
+COLS_TULTITLAN_ORDEN = ["N° DE PARTE", "SUGERIDO DIA", "POR FINCAR", "(Consumo Mensual / 2) - Inv Tran", "EXISTENCIA", "FECHA DE ULTIMA COMPRA", "PROMEDIO TULTITLAN", "HITS", "CONSUMO MENSUAL", "2", "INVENTARIO CUAUTITLAN", "PROMEDIO CUAUTITLAN", "HITS_FORANEO", "TRASPASO CUAUT A TULTI", "NUEVO TRASPASO", "CANTIDAD A TRASPASAR", "Fec ult Comp CUAUTI", "TRANSITO", "INV. TOTAL", "MESES VENTA ACTUAL", "MESES VENTA SUGERIDO", "Line Value", "Cycle Count", "Status", "Ship Multiple", "Last 12 Month Demand", "Current Month Demand", "Job Quantity", "Full Bin", "Bin Location", "Dealer On Hand", "Stock on Order", "Stock On Back Order", "Reason Code"]
 
 def limpiar_inventario(archivo, nombre_sucursal):
     try:
@@ -247,7 +294,17 @@ def completar_y_ordenar(df, lista_columnas_deseadas):
 
 st.info("📂 Los archivos se subirán a Google Drive (Unidad Compartida). Se leerá historial de 'Mi Unidad'.")
 
-# PASOS 1, 2, 3, 4
+# DETECTIVE
+with st.expander("🕵️ MODO DETECTIVE (Revisar HITS)"):
+    col_deb1, col_deb2 = st.columns(2)
+    np_investigar = col_deb1.text_input("N° PARTE:", "")
+    agencia_inv = col_deb2.selectbox("Agencia:", ["CUAUTITLAN", "TULTITLAN"])
+    if st.button("🔍 Investigar"):
+        if np_investigar: calcular_hits_historicos(agencia_inv, debug_np=np_investigar)
+
+st.markdown("---")
+
+# PASOS
 st.header("Paso 1: Bases Iniciales (Sugeridos)")
 c1, c2 = st.columns(2)
 file_sug_cuauti = c1.file_uploader("📂 Sugerido Cuauti", type=["xlsx"], key="sc")
@@ -274,45 +331,32 @@ file_inv_tulti = c8.file_uploader("📦 Inv. Tulti", type=["xlsx", "xls"], key="
 if st.button("🚀 PROCESAR TODO"):
     if file_sug_cuauti and file_sug_tulti and file_inv_cuauti and file_inv_tulti:
         
-        # --- A. HITS HISTORICOS (CRUCE DE INFORMACION) ---
-        # 1. Calculamos Hits de Cuautitlan (Usando archivos CUAUTITLAN_..._MASTER)
         df_hits_origen_cuauti = calcular_hits_historicos("CUAUTITLAN")
-        
-        # 2. Calculamos Hits de Tultitlan (Usando archivos TULTITLAN_..._MASTER)
         df_hits_origen_tulti = calcular_hits_historicos("TULTITLAN")
 
         with st.spinner('Procesando bases locales...'):
-            # --- B. CARGA NORMAL ---
             base_c = cargar_base_sugerido(file_sug_cuauti)
             base_t = cargar_base_sugerido(file_sug_tulti)
             inv_c = limpiar_inventario(file_inv_cuauti, "Cuauti")
             inv_t = limpiar_inventario(file_inv_tulti, "Tulti")
-            
             trans_c = procesar_transito(file_trans_cuauti) if file_trans_cuauti else pd.DataFrame(columns=["N° PARTE", "TRANSITO"])
             trans_t = procesar_transito(file_trans_tulti) if file_trans_tulti else pd.DataFrame(columns=["N° PARTE", "TRANSITO"])
-
             trasp_c = procesar_traspasos(file_sit_cuauti, "TRASUCTU") if file_sit_cuauti else pd.DataFrame(columns=["N° PARTE", "CANTIDAD_TRASPASO"])
             trasp_t = procesar_traspasos(file_sit_tulti, "TRASUCCU") if file_sit_tulti else pd.DataFrame(columns=["N° PARTE", "CANTIDAD_TRASPASO"])
 
             if base_c is not None and base_t is not None:
-                
-                # === 1. HOJA DIA CUAUTITLAN ===
+                # CUAUTI
                 final_c = base_c.copy()
-                
-                # COL H: HITS LOCALES (De ventas Cuautitlan)
                 if df_hits_origen_cuauti is not None:
                     hits_local = df_hits_origen_cuauti.copy()
                     hits_local.rename(columns={'NP': 'N° PARTE', 'HITS_CALCULADO': 'HITS'}, inplace=True)
                     if 'HITS' in final_c.columns: del final_c['HITS']
                     final_c = pd.merge(final_c, hits_local, on='N° PARTE', how='left')
-
-                # COL M: HITS FORANEOS (De ventas Tultitlan)
                 if df_hits_origen_tulti is not None:
                     hits_foraneo = df_hits_origen_tulti.copy()
                     hits_foraneo.rename(columns={'NP': 'N° PARTE', 'HITS_CALCULADO': 'HITS_FORANEO'}, inplace=True)
                     final_c = pd.merge(final_c, hits_foraneo, on='N° PARTE', how='left')
-
-                # Merges de Inventario, Transito, Traspaso
+                
                 final_c = pd.merge(final_c, inv_c[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
                 final_c.rename(columns={'EXIST': 'EXISTENCIA', 'FEC ULT COMP': 'FECHA DE ULTIMA COMPRA'}, inplace=True)
                 final_c = pd.merge(final_c, inv_t[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
@@ -320,22 +364,17 @@ if st.button("🚀 PROCESAR TODO"):
                 final_c = pd.merge(final_c, trans_c, on='N° PARTE', how='left')
                 final_c = pd.merge(final_c, trasp_c, on='N° PARTE', how='left')
                 final_c.rename(columns={'CANTIDAD_TRASPASO': 'TRASPASO TULTI A CUATI'}, inplace=True)
-                
                 final_c = completar_y_ordenar(final_c, COLS_CUAUTITLAN_ORDEN)
                 export_c = final_c.copy()
-                export_c.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True) # Renombrar Col M para Excel
+                export_c.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True) 
 
-                # === 2. HOJA DIA TULTITLAN ===
+                # TULTI
                 final_t = base_t.copy()
-
-                # COL H: HITS LOCALES (De ventas Tultitlan)
                 if df_hits_origen_tulti is not None:
                     hits_local_t = df_hits_origen_tulti.copy()
                     hits_local_t.rename(columns={'NP': 'N° PARTE', 'HITS_CALCULADO': 'HITS'}, inplace=True)
                     if 'HITS' in final_t.columns: del final_t['HITS']
                     final_t = pd.merge(final_t, hits_local_t, on='N° PARTE', how='left')
-
-                # COL M: HITS FORANEOS (De ventas Cuautitlan)
                 if df_hits_origen_cuauti is not None:
                     hits_foraneo_t = df_hits_origen_cuauti.copy()
                     hits_foraneo_t.rename(columns={'NP': 'N° PARTE', 'HITS_CALCULADO': 'HITS_FORANEO'}, inplace=True)
@@ -348,13 +387,12 @@ if st.button("🚀 PROCESAR TODO"):
                 final_t = pd.merge(final_t, trans_t, on='N° PARTE', how='left')
                 final_t = pd.merge(final_t, trasp_t, on='N° PARTE', how='left')
                 final_t.rename(columns={'CANTIDAD_TRASPASO': 'TRASPASO CUAUT A TULTI'}, inplace=True)
-                
                 final_t.rename(columns={'N° PARTE': 'N° DE PARTE'}, inplace=True)
                 final_t = completar_y_ordenar(final_t, COLS_TULTITLAN_ORDEN)
                 export_t = final_t.copy()
-                export_t.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True) # Renombrar Col M para Excel
+                export_t.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True) 
 
-                # === 3. SUBIDA ===
+                # SUBIDA
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                     export_c.to_excel(writer, sheet_name='DIA CUAUTITLAN', index=False)
