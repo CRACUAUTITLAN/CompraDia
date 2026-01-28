@@ -9,7 +9,7 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 # Configuración de la página
 st.set_page_config(page_title="Analizador BI - Grupo Andrade", layout="wide")
-st.title("🔧 Herramienta BI: Compras e Inventarios (Fase 4 - Filtro AÑO/MES)")
+st.title("🔧 Herramienta BI: Compras e Inventarios (Fase 5 - Promedios)")
 
 # --- CONFIGURACIÓN GOOGLE DRIVE ---
 try:
@@ -90,39 +90,27 @@ def buscar_archivos_ventas(agencia, anios):
         archivos_encontrados.extend(files)
     return archivos_encontrados
 
-# --- NUEVA LÓGICA BI HITS (AÑO/MES) ---
+# --- LOGICA BI (HISTÓRICO: HITS Y PROMEDIOS) ---
 
 def mapear_mes_a_numero(mes_texto):
-    """Convierte 'ENERO', 'enero', 'ENE' a 1."""
     if not isinstance(mes_texto, str): return 0
-    
     mes = mes_texto.upper().strip()
     diccionario = {
-        'ENERO': 1, 'FEBRERO': 2, 'MARZO': 3, 'ABRIL': 4,
-        'MAYO': 5, 'JUNIO': 6, 'JULIO': 7, 'AGOSTO': 8,
-        'SEPTIEMBRE': 9, 'OCTUBRE': 10, 'NOVIEMBRE': 11, 'DICIEMBRE': 12,
-        # Variaciones por si acaso
+        'ENERO': 1, 'FEBRERO': 2, 'MARZO': 3, 'ABRIL': 4, 'MAYO': 5, 'JUNIO': 6,
+        'JULIO': 7, 'AGOSTO': 8, 'SEPTIEMBRE': 9, 'OCTUBRE': 10, 'NOVIEMBRE': 11, 'DICIEMBRE': 12,
         'ENE': 1, 'FEB': 2, 'MAR': 3, 'ABR': 4, 'MAY': 5, 'JUN': 6,
         'JUL': 7, 'AGO': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DIC': 12
     }
     return diccionario.get(mes, 0)
 
 def obtener_dataframe_ventas(agencia):
-    """Descarga, une y calcula el 'PERIODO' numérico."""
+    """Descarga, une y filtra por PERIODO (Año/Mes)."""
     hoy = datetime.datetime.now()
-    
-    # Rango 12 meses exactos atrás (ignorando días)
-    # Si hoy es 28/01/2026 -> Limite Superior: 202601 (Exclusivo) -> Inicio: 202501 (Inclusivo)
-    # Si hoy es 15/02/2026 -> Limite Superior: 202602 -> Inicio: 202502
-    
     periodo_fin = hoy.year * 100 + hoy.month
-    
     fecha_inicio = hoy - relativedelta(years=1)
     periodo_inicio = fecha_inicio.year * 100 + fecha_inicio.month
     
-    # Años físicos a buscar en Drive
     anios_drive = list(set([fecha_inicio.year, hoy.year]))
-    
     files_metadata = buscar_archivos_ventas(agencia.upper(), anios_drive)
     
     if not files_metadata: return None, periodo_inicio, periodo_fin
@@ -134,17 +122,13 @@ def obtener_dataframe_ventas(agencia):
             try:
                 engine = 'xlrd' if 'xls' in file_meta['name'] and 'xlsx' not in file_meta['name'] else 'openpyxl'
                 df_temp = pd.read_excel(content, engine=engine)
-                
-                # Estandarizar columnas a mayusculas (AÑO, MES, NP)
                 df_temp.columns = df_temp.columns.str.upper().str.strip()
                 
-                # Mapeo de nombre columna año/mes si varia ligeramente
-                # (A veces viene como 'AÑO', 'ANIO', 'MES', etc)
+                # Normalizar nombres de columnas AÑO y MES
                 rename_map = {}
                 for col in df_temp.columns:
                     if 'AÑO' in col or 'ANIO' in col: rename_map[col] = 'AÑO'
-                    if 'MES' in col and 'PROMEDIO' not in col: rename_map[col] = 'MES' # Evitar confundir con "MESES VENTA"
-                
+                    if 'MES' in col and 'PROMEDIO' not in col: rename_map[col] = 'MES'
                 df_temp.rename(columns=rename_map, inplace=True)
                 
                 if 'AÑO' in df_temp.columns and 'MES' in df_temp.columns:
@@ -156,80 +140,69 @@ def obtener_dataframe_ventas(agencia):
     df_total = pd.concat(dfs, ignore_index=True)
     return df_total, periodo_inicio, periodo_fin
 
-def calcular_hits_historicos(agencia, debug_np=None):
+def calcular_bi_historico(agencia, debug_np=None):
     """
-    Calcula HITS usando filtro numérico de AÑO y MES.
+    Calcula DOS cosas:
+    1. HITS = Eventos - (Negativos * 2)
+    2. PROMEDIO = Suma Cantidad / 12
     """
     df_total, p_inicio, p_fin = obtener_dataframe_ventas(agencia)
     
     if df_total is None:
-        if debug_np: st.error(f"No se encontraron archivos para {agencia}.")
+        if debug_np: st.error(f"No hay datos para {agencia}.")
         return None
 
-    # --- LÓGICA DE FILTRADO ROBUSTA ---
-    
-    # 1. Limpieza de AÑO
+    # Limpieza para filtrado
     df_total['AÑO'] = pd.to_numeric(df_total['AÑO'], errors='coerce').fillna(0).astype(int)
-    
-    # 2. Limpieza de MES (Texto a Número)
-    # Asumimos que la columna 'MES' tiene texto (ENERO, FEBRERO...)
     df_total['MES_NUM'] = df_total['MES'].astype(str).apply(mapear_mes_a_numero)
-    
-    # 3. Crear PERIODO (YYYYMM)
     df_total['PERIODO'] = (df_total['AÑO'] * 100) + df_total['MES_NUM']
     
-    # Debug
+    # DEBUG
     if debug_np:
         st.markdown(f"### 🕵️ MODO DETECTIVE: {debug_np} en {agencia}")
-        st.write(f"**Rango Periodo:** {p_inicio} (Incluido) al {p_fin} (Excluido)")
-        
+        st.write(f"**Periodo:** {p_inicio} al {p_fin}")
         if 'NP' in df_total.columns:
             df_total['NP_STR'] = df_total['NP'].astype(str).str.strip()
-            df_debug = df_total[df_total['NP_STR'] == str(debug_np).strip()].copy()
-            st.write(f"1. Filas totales en Excel (sin filtrar): **{len(df_debug)}**")
-            if not df_debug.empty:
-                st.write("Muestra de datos crudos (Mira las columnas AÑO y MES):")
-                st.dataframe(df_debug[['AÑO', 'MES', 'PERIODO', 'CANTIDAD']].head())
-    
-    # 4. FILTRO FINAL (El corazón del programa)
-    # Traeme todo lo que sea Mayor o Igual al Inicio Y Menor que el Fin
+            debug_raw = df_total[df_total['NP_STR'] == str(debug_np).strip()]
+            st.write(f"Filas Totales en Excel: {len(debug_raw)}")
+
+    # FILTRO PERIODO
     mask = (df_total['PERIODO'] >= p_inicio) & (df_total['PERIODO'] < p_fin)
     df_filtrado = df_total.loc[mask].copy()
 
-    if debug_np and 'NP' in df_total.columns:
-        df_debug_filt = df_filtrado[df_filtrado['NP'].astype(str).str.strip() == str(debug_np).strip()]
-        st.write(f"2. Filas después del filtro de periodo: **{len(df_debug_filt)}**")
-        st.write(f"Estas son las filas que se usarán para el cálculo (Rango {p_inicio}-{p_fin}):")
-        st.dataframe(df_debug_filt[['AÑO', 'MES', 'CANTIDAD']].sort_values(['AÑO', 'MES']))
-
     if df_filtrado.empty: return None
 
-    # 5. Cálculo Matemático
+    # CALCULO MATEMATICO (HITS Y PROMEDIOS)
     if 'NP' not in df_filtrado.columns or 'CANTIDAD' not in df_filtrado.columns: return None
         
     df_filtrado['NP'] = df_filtrado['NP'].astype(str).str.strip()
     df_filtrado['CANTIDAD'] = pd.to_numeric(df_filtrado['CANTIDAD'], errors='coerce').fillna(0)
     
+    # Agrupamos
     resumen = df_filtrado.groupby('NP').agg(
         total_eventos=('CANTIDAD', 'count'),
-        eventos_negativos=('CANTIDAD', lambda x: (x < 0).sum())
+        eventos_negativos=('CANTIDAD', lambda x: (x < 0).sum()),
+        suma_cantidad=('CANTIDAD', 'sum') # Suma aritmética simple (9 + (-9) = 0)
     ).reset_index()
     
+    # Formula HITS
     resumen['HITS_CALCULADO'] = resumen['total_eventos'] - (resumen['eventos_negativos'] * 2)
     resumen['HITS_CALCULADO'] = resumen['HITS_CALCULADO'].clip(lower=0) 
     
+    # Formula PROMEDIO (Suma / 12)
+    resumen['PROMEDIO_CALCULADO'] = resumen['suma_cantidad'] / 12
+
+    # DEBUG RESULTADOS
     if debug_np:
         row = resumen[resumen['NP'] == str(debug_np).strip()]
         if not row.empty:
-            ev = row.iloc[0]['total_eventos']
-            neg = row.iloc[0]['eventos_negativos']
-            calc = row.iloc[0]['HITS_CALCULADO']
-            st.success(f"🧮 CÁLCULO: {ev} Total - ({neg} Negativos * 2) = **{calc} HITS**")
+            st.success(f"**HITS:** {row.iloc[0]['HITS_CALCULADO']} | **SUMA CANTIDAD:** {row.iloc[0]['suma_cantidad']} | **PROMEDIO:** {row.iloc[0]['PROMEDIO_CALCULADO']}")
+        else:
+            st.warning("No hay ventas en el rango de fechas.")
 
-    return resumen[['NP', 'HITS_CALCULADO']]
+    return resumen[['NP', 'HITS_CALCULADO', 'PROMEDIO_CALCULADO']]
 
 # --- FUNCIONES PANDAS ---
-# (Funciones estándar mantenidas)
 COLS_CUAUTITLAN_ORDEN = ["N° PARTE", "SUGERIDO DIA", "POR FINCAR", "(Consumo Mensual / 2) - Inv Tran", "EXISTENCIA", "FECHA DE ULTIMA COMPRA", "PROMEDIO CUAUTITLAN", "HITS", "CONSUMO MENSUAL", "2", "INVENTARIO TULTITLAN", "PROMEDIO TULTITLAN", "HITS_FORANEO", "TRASPASO TULTI A CUATI", "NUEVO TRASPASO", "CANTIDAD A TRASPASAR", "Fec ult Comp TULTI", "TRANSITO", "INV. TOTAL", "MESES VENTA ACTUAL", "MESES VENTA SUGERIDO", "Line Value", "Cycle Count", "Status", "Ship Multiple", "Last 12 Month Demand", "Current Month Demand", "Job Quantity", "Full Bin", "Bin Location", "Dealer On Hand", "Stock on Order", "Stock On Back Order", "Reason Code"]
 COLS_TULTITLAN_ORDEN = ["N° DE PARTE", "SUGERIDO DIA", "POR FINCAR", "(Consumo Mensual / 2) - Inv Tran", "EXISTENCIA", "FECHA DE ULTIMA COMPRA", "PROMEDIO TULTITLAN", "HITS", "CONSUMO MENSUAL", "2", "INVENTARIO CUAUTITLAN", "PROMEDIO CUAUTITLAN", "HITS_FORANEO", "TRASPASO CUAUT A TULTI", "NUEVO TRASPASO", "CANTIDAD A TRASPASAR", "Fec ult Comp CUAUTI", "TRANSITO", "INV. TOTAL", "MESES VENTA ACTUAL", "MESES VENTA SUGERIDO", "Line Value", "Cycle Count", "Status", "Ship Multiple", "Last 12 Month Demand", "Current Month Demand", "Job Quantity", "Full Bin", "Bin Location", "Dealer On Hand", "Stock on Order", "Stock On Back Order", "Reason Code"]
 
@@ -295,12 +268,12 @@ def completar_y_ordenar(df, lista_columnas_deseadas):
 st.info("📂 Los archivos se subirán a Google Drive (Unidad Compartida). Se leerá historial de 'Mi Unidad'.")
 
 # DETECTIVE
-with st.expander("🕵️ MODO DETECTIVE (Revisar HITS)"):
+with st.expander("🕵️ MODO DETECTIVE (Revisar HITS y PROMEDIOS)"):
     col_deb1, col_deb2 = st.columns(2)
     np_investigar = col_deb1.text_input("N° PARTE:", "")
     agencia_inv = col_deb2.selectbox("Agencia:", ["CUAUTITLAN", "TULTITLAN"])
     if st.button("🔍 Investigar"):
-        if np_investigar: calcular_hits_historicos(agencia_inv, debug_np=np_investigar)
+        if np_investigar: calcular_bi_historico(agencia_inv, debug_np=np_investigar)
 
 st.markdown("---")
 
@@ -331,8 +304,9 @@ file_inv_tulti = c8.file_uploader("📦 Inv. Tulti", type=["xlsx", "xls"], key="
 if st.button("🚀 PROCESAR TODO"):
     if file_sug_cuauti and file_sug_tulti and file_inv_cuauti and file_inv_tulti:
         
-        df_hits_origen_cuauti = calcular_hits_historicos("CUAUTITLAN")
-        df_hits_origen_tulti = calcular_hits_historicos("TULTITLAN")
+        # A. BI HISTORICO (HITS + PROMEDIOS)
+        df_bi_cuauti = calcular_bi_historico("CUAUTITLAN")
+        df_bi_tulti = calcular_bi_historico("TULTITLAN")
 
         with st.spinner('Procesando bases locales...'):
             base_c = cargar_base_sugerido(file_sug_cuauti)
@@ -345,18 +319,33 @@ if st.button("🚀 PROCESAR TODO"):
             trasp_t = procesar_traspasos(file_sit_tulti, "TRASUCCU") if file_sit_tulti else pd.DataFrame(columns=["N° PARTE", "CANTIDAD_TRASPASO"])
 
             if base_c is not None and base_t is not None:
-                # CUAUTI
+                # === HOJA DIA CUAUTITLAN ===
                 final_c = base_c.copy()
-                if df_hits_origen_cuauti is not None:
-                    hits_local = df_hits_origen_cuauti.copy()
-                    hits_local.rename(columns={'NP': 'N° PARTE', 'HITS_CALCULADO': 'HITS'}, inplace=True)
-                    if 'HITS' in final_c.columns: del final_c['HITS']
-                    final_c = pd.merge(final_c, hits_local, on='N° PARTE', how='left')
-                if df_hits_origen_tulti is not None:
-                    hits_foraneo = df_hits_origen_tulti.copy()
-                    hits_foraneo.rename(columns={'NP': 'N° PARTE', 'HITS_CALCULADO': 'HITS_FORANEO'}, inplace=True)
-                    final_c = pd.merge(final_c, hits_foraneo, on='N° PARTE', how='left')
                 
+                # 1. BI LOCAL (Ventas Cuauti): HITS y PROMEDIO CUAUTITLAN
+                if df_bi_cuauti is not None:
+                    bi_local = df_bi_cuauti.copy()
+                    bi_local.rename(columns={
+                        'NP': 'N° PARTE', 
+                        'HITS_CALCULADO': 'HITS',
+                        'PROMEDIO_CALCULADO': 'PROMEDIO CUAUTITLAN'
+                    }, inplace=True)
+                    # Limpiamos columnas previas si existen
+                    if 'HITS' in final_c.columns: del final_c['HITS']
+                    if 'PROMEDIO CUAUTITLAN' in final_c.columns: del final_c['PROMEDIO CUAUTITLAN']
+                    final_c = pd.merge(final_c, bi_local, on='N° PARTE', how='left')
+
+                # 2. BI FORANEO (Ventas Tulti): HITS_FORANEO y PROMEDIO TULTITLAN
+                if df_bi_tulti is not None:
+                    bi_foraneo = df_bi_tulti.copy()
+                    bi_foraneo.rename(columns={
+                        'NP': 'N° PARTE', 
+                        'HITS_CALCULADO': 'HITS_FORANEO',
+                        'PROMEDIO_CALCULADO': 'PROMEDIO TULTITLAN'
+                    }, inplace=True)
+                    if 'PROMEDIO TULTITLAN' in final_c.columns: del final_c['PROMEDIO TULTITLAN']
+                    final_c = pd.merge(final_c, bi_foraneo, on='N° PARTE', how='left')
+
                 final_c = pd.merge(final_c, inv_c[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
                 final_c.rename(columns={'EXIST': 'EXISTENCIA', 'FEC ULT COMP': 'FECHA DE ULTIMA COMPRA'}, inplace=True)
                 final_c = pd.merge(final_c, inv_t[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
@@ -366,19 +355,33 @@ if st.button("🚀 PROCESAR TODO"):
                 final_c.rename(columns={'CANTIDAD_TRASPASO': 'TRASPASO TULTI A CUATI'}, inplace=True)
                 final_c = completar_y_ordenar(final_c, COLS_CUAUTITLAN_ORDEN)
                 export_c = final_c.copy()
-                export_c.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True) 
+                export_c.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True)
 
-                # TULTI
+                # === HOJA DIA TULTITLAN ===
                 final_t = base_t.copy()
-                if df_hits_origen_tulti is not None:
-                    hits_local_t = df_hits_origen_tulti.copy()
-                    hits_local_t.rename(columns={'NP': 'N° PARTE', 'HITS_CALCULADO': 'HITS'}, inplace=True)
+
+                # 1. BI LOCAL (Ventas Tulti): HITS y PROMEDIO TULTITLAN
+                if df_bi_tulti is not None:
+                    bi_local_t = df_bi_tulti.copy()
+                    bi_local_t.rename(columns={
+                        'NP': 'N° PARTE', 
+                        'HITS_CALCULADO': 'HITS',
+                        'PROMEDIO_CALCULADO': 'PROMEDIO TULTITLAN'
+                    }, inplace=True)
                     if 'HITS' in final_t.columns: del final_t['HITS']
-                    final_t = pd.merge(final_t, hits_local_t, on='N° PARTE', how='left')
-                if df_hits_origen_cuauti is not None:
-                    hits_foraneo_t = df_hits_origen_cuauti.copy()
-                    hits_foraneo_t.rename(columns={'NP': 'N° PARTE', 'HITS_CALCULADO': 'HITS_FORANEO'}, inplace=True)
-                    final_t = pd.merge(final_t, hits_foraneo_t, on='N° PARTE', how='left')
+                    if 'PROMEDIO TULTITLAN' in final_t.columns: del final_t['PROMEDIO TULTITLAN']
+                    final_t = pd.merge(final_t, bi_local_t, on='N° PARTE', how='left')
+
+                # 2. BI FORANEO (Ventas Cuauti): HITS_FORANEO y PROMEDIO CUAUTITLAN
+                if df_bi_cuauti is not None:
+                    bi_foraneo_t = df_bi_cuauti.copy()
+                    bi_foraneo_t.rename(columns={
+                        'NP': 'N° PARTE', 
+                        'HITS_CALCULADO': 'HITS_FORANEO',
+                        'PROMEDIO_CALCULADO': 'PROMEDIO CUAUTITLAN'
+                    }, inplace=True)
+                    if 'PROMEDIO CUAUTITLAN' in final_t.columns: del final_t['PROMEDIO CUAUTITLAN']
+                    final_t = pd.merge(final_t, bi_foraneo_t, on='N° PARTE', how='left')
 
                 final_t = pd.merge(final_t, inv_t[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
                 final_t.rename(columns={'EXIST': 'EXISTENCIA', 'FEC ULT COMP': 'FECHA DE ULTIMA COMPRA'}, inplace=True)
@@ -390,7 +393,7 @@ if st.button("🚀 PROCESAR TODO"):
                 final_t.rename(columns={'N° PARTE': 'N° DE PARTE'}, inplace=True)
                 final_t = completar_y_ordenar(final_t, COLS_TULTITLAN_ORDEN)
                 export_t = final_t.copy()
-                export_t.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True) 
+                export_t.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True)
 
                 # SUBIDA
                 buffer = io.BytesIO()
