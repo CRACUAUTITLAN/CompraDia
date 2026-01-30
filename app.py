@@ -243,10 +243,10 @@ def formatear_excel_final(writer, df, sheet_name):
     workbook = writer.book
     worksheet = writer.sheets[sheet_name]
     
-    # *** AQUÍ ESTÁ EL CAMBIO: INMOVILIZAR PANELES (FILA 1) ***
+    # INMOVILIZAR PANELES (FILA 1)
     worksheet.freeze_panes(1, 0)
     
-    # 1. ESTILOS CORPORATIVOS CRA
+    # ESTILOS CORPORATIVOS CRA
     fmt_header_base = workbook.add_format({
         'bold': True, 'text_wrap': True, 'valign': 'vcenter', 'align': 'center',
         'bg_color': '#10345C', 'font_color': 'white', 'border': 1
@@ -269,7 +269,7 @@ def formatear_excel_final(writer, df, sheet_name):
 
     cell_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3'})
     
-    # 2. APLICAR FORMATO A ENCABEZADOS
+    # APLICAR FORMATO A ENCABEZADOS
     for col_num, value in enumerate(df.columns.values):
         col_name = str(value).upper()
         style = fmt_header_base
@@ -294,7 +294,7 @@ def formatear_excel_final(writer, df, sheet_name):
     worksheet.set_column('A:A', 20) 
     worksheet.set_column('B:Z', 14, cell_fmt) 
     
-    # 3. INSERTAR FÓRMULAS
+    # INSERTAR FÓRMULAS
     start_row = 1
     for i in range(len(df)):
         row = start_row + i
@@ -357,95 +357,109 @@ file_inv_tulti = c8.file_uploader("📦 Inv. Tulti", type=["xlsx", "xls"], key="
 if st.button("🚀 PROCESAR Y GENERAR REPORTE"):
     if file_sug_cuauti and file_sug_tulti and file_inv_cuauti and file_inv_tulti:
         
-        # A. BI HISTORICO
+        # BARRA DE PROGRESO INICIAL
+        my_bar = st.progress(0, text="⏳ Iniciando protocolos de conexión...")
+
+        # 20%: Conectando y calculando Históricos
+        my_bar.progress(20, text="📊 Consultando histórico de ventas en Drive (HITS)...")
         df_bi_cuauti = calcular_bi_historico("CUAUTITLAN")
+        
+        my_bar.progress(40, text="📊 Consultando histórico de ventas en Drive (HITS Tulti)...")
         df_bi_tulti = calcular_bi_historico("TULTITLAN")
 
-        with st.spinner('Procesando bases y generando diseño corporativo...'):
-            base_c = cargar_base_sugerido(file_sug_cuauti)
-            base_t = cargar_base_sugerido(file_sug_tulti)
-            inv_c = limpiar_inventario(file_inv_cuauti, "Cuauti")
-            inv_t = limpiar_inventario(file_inv_tulti, "Tulti")
-            trans_c = procesar_transito(file_trans_cuauti) if file_trans_cuauti else pd.DataFrame(columns=["N° PARTE", "TRANSITO"])
-            trans_t = procesar_transito(file_trans_tulti) if file_trans_tulti else pd.DataFrame(columns=["N° PARTE", "TRANSITO"])
-            trasp_c = procesar_traspasos(file_sit_cuauti, "TRASUCTU") if file_sit_cuauti else pd.DataFrame(columns=["N° PARTE", "CANTIDAD_TRASPASO"])
-            trasp_t = procesar_traspasos(file_sit_tulti, "TRASUCCU") if file_sit_tulti else pd.DataFrame(columns=["N° PARTE", "CANTIDAD_TRASPASO"])
+        # 50%: Procesamiento local
+        my_bar.progress(50, text="⚙️ Cruzando bases de inventarios y tránsitos...")
+        
+        base_c = cargar_base_sugerido(file_sug_cuauti)
+        base_t = cargar_base_sugerido(file_sug_tulti)
+        inv_c = limpiar_inventario(file_inv_cuauti, "Cuauti")
+        inv_t = limpiar_inventario(file_inv_tulti, "Tulti")
+        trans_c = procesar_transito(file_trans_cuauti) if file_trans_cuauti else pd.DataFrame(columns=["N° PARTE", "TRANSITO"])
+        trans_t = procesar_transito(file_trans_tulti) if file_trans_tulti else pd.DataFrame(columns=["N° PARTE", "TRANSITO"])
+        trasp_c = procesar_traspasos(file_sit_cuauti, "TRASUCTU") if file_sit_cuauti else pd.DataFrame(columns=["N° PARTE", "CANTIDAD_TRASPASO"])
+        trasp_t = procesar_traspasos(file_sit_tulti, "TRASUCCU") if file_sit_tulti else pd.DataFrame(columns=["N° PARTE", "CANTIDAD_TRASPASO"])
 
-            if base_c is not None and base_t is not None:
-                # === HOJA DIA CUAUTITLAN ===
-                final_c = base_c.copy()
+        if base_c is not None and base_t is not None:
+            # === HOJA DIA CUAUTITLAN ===
+            final_c = base_c.copy()
+            
+            if df_bi_cuauti is not None:
+                bi_local = df_bi_cuauti.copy()
+                bi_local.rename(columns={'NP': 'N° PARTE', 'HITS_CALCULADO': 'HITS', 'PROMEDIO_CALCULADO': 'PROMEDIO CUAUTITLAN'}, inplace=True)
+                if 'HITS' in final_c.columns: del final_c['HITS']
+                if 'PROMEDIO CUAUTITLAN' in final_c.columns: del final_c['PROMEDIO CUAUTITLAN']
+                final_c = pd.merge(final_c, bi_local, on='N° PARTE', how='left')
+
+            if df_bi_tulti is not None:
+                bi_foraneo = df_bi_tulti.copy()
+                bi_foraneo.rename(columns={'NP': 'N° PARTE', 'HITS_CALCULADO': 'HITS_FORANEO', 'PROMEDIO_CALCULADO': 'PROMEDIO TULTITLAN'}, inplace=True)
+                if 'PROMEDIO TULTITLAN' in final_c.columns: del final_c['PROMEDIO TULTITLAN']
+                final_c = pd.merge(final_c, bi_foraneo, on='N° PARTE', how='left')
+
+            final_c = pd.merge(final_c, inv_c[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
+            final_c.rename(columns={'EXIST': 'EXISTENCIA', 'FEC ULT COMP': 'FECHA DE ULTIMA COMPRA'}, inplace=True)
+            final_c = pd.merge(final_c, inv_t[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
+            final_c.rename(columns={'EXIST': 'INVENTARIO TULTITLAN', 'FEC ULT COMP': 'Fec ult Comp TULTI'}, inplace=True)
+            final_c = pd.merge(final_c, trans_c, on='N° PARTE', how='left')
+            final_c = pd.merge(final_c, trasp_c, on='N° PARTE', how='left')
+            final_c.rename(columns={'CANTIDAD_TRASPASO': 'TRASPASO TULTI A CUATI'}, inplace=True)
+            final_c = completar_y_ordenar(final_c, COLS_CUAUTITLAN_ORDEN)
+            export_c = final_c.copy()
+            export_c.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True)
+
+            # === HOJA DIA TULTITLAN ===
+            final_t = base_t.copy()
+
+            if df_bi_tulti is not None:
+                bi_local_t = df_bi_tulti.copy()
+                bi_local_t.rename(columns={'NP': 'N° PARTE', 'HITS_CALCULADO': 'HITS', 'PROMEDIO_CALCULADO': 'PROMEDIO TULTITLAN'}, inplace=True)
+                if 'HITS' in final_t.columns: del final_t['HITS']
+                if 'PROMEDIO TULTITLAN' in final_t.columns: del final_t['PROMEDIO TULTITLAN']
+                final_t = pd.merge(final_t, bi_local_t, on='N° PARTE', how='left')
+
+            if df_bi_cuauti is not None:
+                bi_foraneo_t = df_bi_cuauti.copy()
+                bi_foraneo_t.rename(columns={'NP': 'N° PARTE', 'HITS_CALCULADO': 'HITS_FORANEO', 'PROMEDIO_CALCULADO': 'PROMEDIO CUAUTITLAN'}, inplace=True)
+                if 'PROMEDIO CUAUTITLAN' in final_t.columns: del final_t['PROMEDIO CUAUTITLAN']
+                final_t = pd.merge(final_t, bi_foraneo_t, on='N° PARTE', how='left')
+
+            final_t = pd.merge(final_t, inv_t[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
+            final_t.rename(columns={'EXIST': 'EXISTENCIA', 'FEC ULT COMP': 'FECHA DE ULTIMA COMPRA'}, inplace=True)
+            final_t = pd.merge(final_t, inv_c[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
+            final_t.rename(columns={'EXIST': 'INVENTARIO CUAUTITLAN', 'FEC ULT COMP': 'Fec ult Comp CUAUTI'}, inplace=True)
+            final_t = pd.merge(final_t, trans_t, on='N° PARTE', how='left')
+            final_t = pd.merge(final_t, trasp_t, on='N° PARTE', how='left')
+            final_t.rename(columns={'CANTIDAD_TRASPASO': 'TRASPASO CUAUT A TULTI'}, inplace=True)
+            
+            final_t.rename(columns={'N° PARTE': 'N° DE PARTE'}, inplace=True)
+            final_t = completar_y_ordenar(final_t, COLS_TULTITLAN_ORDEN)
+            export_t = final_t.copy()
+            export_t.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True)
+
+            # 80%: Generando Excel
+            my_bar.progress(80, text="🎨 Aplicando diseño corporativo y fórmulas...")
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                export_c.to_excel(writer, sheet_name='DIA CUAUTITLAN', index=False)
+                formatear_excel_final(writer, export_c, 'DIA CUAUTITLAN')
                 
-                if df_bi_cuauti is not None:
-                    bi_local = df_bi_cuauti.copy()
-                    bi_local.rename(columns={'NP': 'N° PARTE', 'HITS_CALCULADO': 'HITS', 'PROMEDIO_CALCULADO': 'PROMEDIO CUAUTITLAN'}, inplace=True)
-                    if 'HITS' in final_c.columns: del final_c['HITS']
-                    if 'PROMEDIO CUAUTITLAN' in final_c.columns: del final_c['PROMEDIO CUAUTITLAN']
-                    final_c = pd.merge(final_c, bi_local, on='N° PARTE', how='left')
-
-                if df_bi_tulti is not None:
-                    bi_foraneo = df_bi_tulti.copy()
-                    bi_foraneo.rename(columns={'NP': 'N° PARTE', 'HITS_CALCULADO': 'HITS_FORANEO', 'PROMEDIO_CALCULADO': 'PROMEDIO TULTITLAN'}, inplace=True)
-                    if 'PROMEDIO TULTITLAN' in final_c.columns: del final_c['PROMEDIO TULTITLAN']
-                    final_c = pd.merge(final_c, bi_foraneo, on='N° PARTE', how='left')
-
-                final_c = pd.merge(final_c, inv_c[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
-                final_c.rename(columns={'EXIST': 'EXISTENCIA', 'FEC ULT COMP': 'FECHA DE ULTIMA COMPRA'}, inplace=True)
-                final_c = pd.merge(final_c, inv_t[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
-                final_c.rename(columns={'EXIST': 'INVENTARIO TULTITLAN', 'FEC ULT COMP': 'Fec ult Comp TULTI'}, inplace=True)
-                final_c = pd.merge(final_c, trans_c, on='N° PARTE', how='left')
-                final_c = pd.merge(final_c, trasp_c, on='N° PARTE', how='left')
-                final_c.rename(columns={'CANTIDAD_TRASPASO': 'TRASPASO TULTI A CUATI'}, inplace=True)
-                final_c = completar_y_ordenar(final_c, COLS_CUAUTITLAN_ORDEN)
-                export_c = final_c.copy()
-                export_c.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True)
-
-                # === HOJA DIA TULTITLAN ===
-                final_t = base_t.copy()
-
-                if df_bi_tulti is not None:
-                    bi_local_t = df_bi_tulti.copy()
-                    bi_local_t.rename(columns={'NP': 'N° PARTE', 'HITS_CALCULADO': 'HITS', 'PROMEDIO_CALCULADO': 'PROMEDIO TULTITLAN'}, inplace=True)
-                    if 'HITS' in final_t.columns: del final_t['HITS']
-                    if 'PROMEDIO TULTITLAN' in final_t.columns: del final_t['PROMEDIO TULTITLAN']
-                    final_t = pd.merge(final_t, bi_local_t, on='N° PARTE', how='left')
-
-                if df_bi_cuauti is not None:
-                    bi_foraneo_t = df_bi_cuauti.copy()
-                    bi_foraneo_t.rename(columns={'NP': 'N° PARTE', 'HITS_CALCULADO': 'HITS_FORANEO', 'PROMEDIO_CALCULADO': 'PROMEDIO CUAUTITLAN'}, inplace=True)
-                    if 'PROMEDIO CUAUTITLAN' in final_t.columns: del final_t['PROMEDIO CUAUTITLAN']
-                    final_t = pd.merge(final_t, bi_foraneo_t, on='N° PARTE', how='left')
-
-                final_t = pd.merge(final_t, inv_t[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
-                final_t.rename(columns={'EXIST': 'EXISTENCIA', 'FEC ULT COMP': 'FECHA DE ULTIMA COMPRA'}, inplace=True)
-                final_t = pd.merge(final_t, inv_c[['N° PARTE', 'EXIST', 'FEC ULT COMP']], on='N° PARTE', how='left')
-                final_t.rename(columns={'EXIST': 'INVENTARIO CUAUTITLAN', 'FEC ULT COMP': 'Fec ult Comp CUAUTI'}, inplace=True)
-                final_t = pd.merge(final_t, trans_t, on='N° PARTE', how='left')
-                final_t = pd.merge(final_t, trasp_t, on='N° PARTE', how='left')
-                final_t.rename(columns={'CANTIDAD_TRASPASO': 'TRASPASO CUAUT A TULTI'}, inplace=True)
+                export_t.to_excel(writer, sheet_name='DIA TULTITLAN', index=False)
+                formatear_excel_final(writer, export_t, 'DIA TULTITLAN')
                 
-                final_t.rename(columns={'N° PARTE': 'N° DE PARTE'}, inplace=True)
-                final_t = completar_y_ordenar(final_t, COLS_TULTITLAN_ORDEN)
-                export_t = final_t.copy()
-                export_t.rename(columns={'HITS_FORANEO': 'HITS'}, inplace=True)
-
-                # === SUBIDA CON DISEÑO Y FORMULAS ===
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                    export_c.to_excel(writer, sheet_name='DIA CUAUTITLAN', index=False)
-                    formatear_excel_final(writer, export_c, 'DIA CUAUTITLAN')
-                    
-                    export_t.to_excel(writer, sheet_name='DIA TULTITLAN', index=False)
-                    formatear_excel_final(writer, export_t, 'DIA TULTITLAN')
-                    
-                buffer.seek(0)
-                
-                fecha_str = datetime.datetime.now().strftime("%d_%m_%Y_%H%M")
-                name_file = f"Analisis_Compras_{fecha_str}.xlsx"
-                link = subir_excel_a_drive(buffer, name_file)
-                
-                if link:
-                    st.success(f"✅ Archivo Maestro Creado: {name_file}")
-                    st.markdown(f"### [📂 Abrir en Google Drive]({link})")
-                    st.balloons()
+            buffer.seek(0)
+            
+            # 90%: Subiendo
+            my_bar.progress(90, text="☁️ Subiendo archivo maestro a Google Drive...")
+            fecha_str = datetime.datetime.now().strftime("%d_%m_%Y_%H%M")
+            name_file = f"Analisis_Compras_{fecha_str}.xlsx"
+            link = subir_excel_a_drive(buffer, name_file)
+            
+            # 100%: Final
+            my_bar.progress(100, text="✅ ¡Proceso completado con éxito!")
+            
+            if link:
+                st.success(f"✅ Archivo Maestro Creado: {name_file}")
+                st.markdown(f"### [📂 Abrir en Google Drive]({link})")
+                st.balloons()
     else:
         st.warning("⚠️ Faltan archivos.")
