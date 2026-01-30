@@ -243,54 +243,47 @@ def formatear_excel_final(writer, df, sheet_name):
     workbook = writer.book
     worksheet = writer.sheets[sheet_name]
     
+    # *** AQUÍ ESTÁ EL CAMBIO: INMOVILIZAR PANELES (FILA 1) ***
+    worksheet.freeze_panes(1, 0)
+    
     # 1. ESTILOS CORPORATIVOS CRA
-    # Estilo Base: Azul Marino Profundo (Corporativo)
     fmt_header_base = workbook.add_format({
         'bold': True, 'text_wrap': True, 'valign': 'vcenter', 'align': 'center',
         'bg_color': '#10345C', 'font_color': 'white', 'border': 1
     })
     
-    # Estilo Local (Sucursal Actual): Azul Acero (Serio)
     fmt_header_local = workbook.add_format({
         'bold': True, 'text_wrap': True, 'valign': 'vcenter', 'align': 'center',
         'bg_color': '#4B8BBE', 'font_color': 'white', 'border': 1
     })
     
-    # Estilo Foraneo (Otra Sucursal): Terracota Oscuro (Diferenciación elegante)
     fmt_header_foraneo = workbook.add_format({
         'bold': True, 'text_wrap': True, 'valign': 'vcenter', 'align': 'center',
         'bg_color': '#A64d4d', 'font_color': 'white', 'border': 1
     })
     
-    # Estilo Input (Usuario): Beige muy claro
     fmt_header_input = workbook.add_format({
         'bold': True, 'text_wrap': True, 'valign': 'vcenter', 'align': 'center',
         'bg_color': '#F2F2F2', 'font_color': 'black', 'border': 1
     })
 
-    # Estilo Celdas (Todo centrado y bordes finos grises)
     cell_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3'})
     
-    # 2. APLICAR FORMATO A ENCABEZADOS SEGÚN LA LÓGICA DE NEGOCIO
+    # 2. APLICAR FORMATO A ENCABEZADOS
     for col_num, value in enumerate(df.columns.values):
         col_name = str(value).upper()
+        style = fmt_header_base
         
-        # Determinar estilo por nombre de columna
-        style = fmt_header_base # Default
-        
-        # Lógica de Colores:
-        if col_num < 3: # Primeras 3 columnas (Prioridad)
+        if col_num < 3: 
             style = fmt_header_base
         elif "NUEVO TRASPASO" in col_name or "CANTIDAD A TRASPASAR" in col_name:
             style = fmt_header_input
         elif "CUAUTITLAN" in sheet_name:
-            # En hoja Cuautitlán: Local es Cuauti (Azul), Foráneo es Tulti (Rojo)
             if "CUAUTI" in col_name or col_name == "HITS" or col_name == "EXISTENCIA" or col_name == "CONSUMO MENSUAL":
                 style = fmt_header_local
             elif "TULTI" in col_name or "FORANEO" in col_name:
                 style = fmt_header_foraneo
         elif "TULTITLAN" in sheet_name:
-            # En hoja Tultitlán: Local es Tulti (Azul), Foráneo es Cuauti (Rojo)
             if "TULTI" in col_name or col_name == "HITS" or col_name == "EXISTENCIA" or col_name == "CONSUMO MENSUAL":
                 style = fmt_header_local
             elif "CUAUTI" in col_name or "FORANEO" in col_name:
@@ -298,7 +291,6 @@ def formatear_excel_final(writer, df, sheet_name):
 
         worksheet.write(0, col_num, value, style)
     
-    # Ajuste de anchos
     worksheet.set_column('A:A', 20) 
     worksheet.set_column('B:Z', 14, cell_fmt) 
     
@@ -308,34 +300,20 @@ def formatear_excel_final(writer, df, sheet_name):
         row = start_row + i
         excel_row = row + 1 
         
-        # Mapeo de columnas por índice (A=0, B=1, C=2...)
-        # N° PARTE=0, SUGERIDO=1, POR FINCAR=2, (Cons/2)-Inv=3, EXISTENCIA=4
-        # FEC ULT=5, PROM LOC=6, HITS=7, CONS MEN=8, "2"=9
-        # INV FOR=10, PROM FOR=11, HITS FOR=12, TRASP FOR=13, NUEVO TRASP=14
-        # CANT TRASP=15, FEC FOR=16, TRANSITO=17, INV TOTAL=18
-        # MESES ACT=19, MESES SUG=20
-        
-        # C: POR FINCAR
-        # Formula: =IF(((B+S+P)/I)>1.5, MIN(I,B), IF((R+(E/I))>3, 0, B-P))
         f_por_fincar = f'=IFERROR(IF(((B{excel_row}+S{excel_row}+P{excel_row})/I{excel_row})>1.5, MIN(I{excel_row},B{excel_row}), IF((R{excel_row}+(E{excel_row}/I{excel_row}))>3, 0, B{excel_row}-P{excel_row})), 0)'
         worksheet.write_formula(row, 2, f_por_fincar, cell_fmt)
         
-        # D: (Consumo/2)-Inv = J-S (Col "2" - Inv Total)
         f_formula_d = f'=J{excel_row}-S{excel_row}'
         worksheet.write_formula(row, 3, f_formula_d, cell_fmt)
         
-        # O: Validacion SI/NO
         worksheet.data_validation(row, 14, row, 14, {'validate': 'list', 'source': ['SI', 'NO']})
         
-        # S: INV TOTAL = R+E+P (Transito + Existencia + Nuevo Traspaso)
         f_inv_total = f'=R{excel_row}+E{excel_row}+P{excel_row}'
         worksheet.write_formula(row, 18, f_inv_total, cell_fmt)
         
-        # T: MESES ACT = S/I
         f_meses_act = f'=IFERROR(S{excel_row}/I{excel_row}, 0)'
         worksheet.write_formula(row, 19, f_meses_act, cell_fmt)
         
-        # U: MESES SUG = (C+S+P)/I
         f_meses_sug = f'=IFERROR((C{excel_row}+S{excel_row}+P{excel_row})/I{excel_row}, 0)'
         worksheet.write_formula(row, 20, f_meses_sug, cell_fmt)
 
@@ -453,7 +431,6 @@ if st.button("🚀 PROCESAR Y GENERAR REPORTE"):
                 # === SUBIDA CON DISEÑO Y FORMULAS ===
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                    # En lugar de to_excel directo, escribimos los datos y luego aplicamos el formato
                     export_c.to_excel(writer, sheet_name='DIA CUAUTITLAN', index=False)
                     formatear_excel_final(writer, export_c, 'DIA CUAUTITLAN')
                     
