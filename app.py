@@ -300,7 +300,7 @@ def formatear_excel_final(writer, df, sheet_name):
         row = start_row + i
         excel_row = row + 1 
         
-        f_por_fincar = f'=IFERROR(IF(((B{excel_row}+S{excel_row}+P{excel_row})/I{excel_row})>1.5, MIN(I{excel_row},B{excel_row}), IF((R{excel_row}+(E{excel_row}/I{excel_row}))>3, 0, B{excel_row}-P{excel_row})), 0)'
+        f_por_fincar = f'=IFERROR(IF(((B{excel_row}+S{excel_row}+P{excel_row})/I{excel_row})>1.5, MIN(I{excel_row},B{excel_row}), IF(((R{excel_row}+E{excel_row})/I{excel_row})>3, 0, B{excel_row}-P{excel_row})), 0)'
         worksheet.write_formula(row, 2, f_por_fincar, cell_fmt)
         
         f_formula_d = f'=J{excel_row}-S{excel_row}'
